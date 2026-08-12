@@ -98,7 +98,7 @@ export default function CampaignComparison() {
       });
 
       const res = await axios.get(
-        `http://localhost:5000/api/campaigns/${TOKEN_ID}/compare?${params}`
+        `/api/campaigns/${TOKEN_ID}/compare?${params}`
       );
 
       setData(res.data);

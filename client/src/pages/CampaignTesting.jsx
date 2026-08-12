@@ -95,7 +95,7 @@ export default function CampaignTesting() {
       const requests = selectedAccounts.map(
         (accountId) =>
           axios.get(
-            `http://localhost:5000/api/campaigns/${TOKEN_ID}/date-range`,
+            `/api/campaigns/${TOKEN_ID}/date-range`,
             {
               params:{
                 adAccountId: accountId,

@@ -22,7 +22,7 @@ export default function OrdersTesting() {
       setLoading(true);
 
       const res = await axios.get(
-        "http://localhost:5000/api/orders/orders",
+        "/api/orders/orders",
         {
           params: {
             since,

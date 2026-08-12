@@ -10,7 +10,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 // Doesn't change what's called on the backend — same /start, /status,
 // /cancel endpoints, same polling cadence — only where the state lives.
 
-const API_BASE = "http://localhost:5000/api";
+const API_BASE = "/api";
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const todayStr = () => new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 
