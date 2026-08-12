@@ -55,7 +55,7 @@ const shiprocketOrderSchema = new mongoose.Schema(
 );
 
 // One record per order id — re-syncing a day upserts rather than duplicates
-shiprocketOrderSchema.index({ orderId: 1 }, { unique: true });
+// shiprocketOrderSchema.index({ orderId: 1 }, { unique: true });
 
 export default mongoose.models.ShiprocketOrder ||
   mongoose.model("ShiprocketOrder", shiprocketOrderSchema);
