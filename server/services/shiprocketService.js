@@ -1,6 +1,6 @@
 import axios from "axios";
 import crypto from "crypto-js";
-import ShiprocketOrder from "../models/shiprocketOrder.js";
+import ShiprocketOrder from "../models/shiprocketorder.js";
 import ShiprocketSyncLog from "../models/ShiprocketSyncLog.js";
 import { todayIstIso, istDayStartUtc, istDayEndUtc } from "../utils/dateIst.js";
 

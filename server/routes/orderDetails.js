@@ -1,5 +1,5 @@
 import express from "express";
-import ShiprocketOrder from "../models/shiprocketOrder.js";
+import ShiprocketOrder from "../models/shiprocketorder.js";
 import OrderNote from "../models/OrderNote.js";
 
 const router = express.Router();

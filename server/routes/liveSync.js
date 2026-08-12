@@ -1,5 +1,5 @@
 import express from "express";
-import ShiprocketOrder from "../models/shiprocketOrder.js";
+import ShiprocketOrder from "../models/shiprocketorder.js";
 import ShiprocketSyncLog from "../models/ShiprocketSyncLog.js";
 import { backfillShiprocketRange, getBackfillState } from "../services/shiprocketService.js";
 import { todayIstIso } from "../utils/dateIst.js";

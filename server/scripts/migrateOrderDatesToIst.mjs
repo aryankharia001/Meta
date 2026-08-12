@@ -24,7 +24,7 @@
 
 import dotenv from "dotenv";
 import mongoose from "mongoose";
-import Order from "../models/shiprocketOrder.js";
+import Order from "../models/shiprocketorder.js";
 import { istDateStr } from "../utils/dateIst.js";
 
 dotenv.config();

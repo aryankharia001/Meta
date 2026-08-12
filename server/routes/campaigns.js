@@ -1,5 +1,5 @@
 import express from "express";
-import ShiprocketOrder from "../models/shiprocketOrder.js";
+import ShiprocketOrder from "../models/shiprocketorder.js";
 import Token from "../models/Token.js";
 import AdAccount from "../models/AdAccount.js";
 
