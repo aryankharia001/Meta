@@ -1,5 +1,5 @@
 import express from "express";
-import Order from "../models/shiprocketorder.js";
+import Order from "../models/shiprocketOrder.js";
 import Token from "../models/Token.js";
 import { todayIstIso } from "../utils/dateIst.js";
 
