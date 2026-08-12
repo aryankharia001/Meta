@@ -5,6 +5,7 @@ import { useSelectedToken } from "../lib/useSelectedToken";
 import CampaignLink from "../components/CampaignLink";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
+import { roasClass } from "../lib/campaignDisplay";
 
 // Live dashboard combining campaign spend (Meta) with matched Shiprocket
 // orders — built entirely on top of the existing, already-working
@@ -353,11 +354,7 @@ export default function LiveCampaignsPage() {
                       <td>{c.orders}</td>
                       <td>₹{Number(c.revenue || 0).toFixed(2)}</td>
                       <td>₹{Number(c.costPerOrder || 0).toFixed(2)}</td>
-                      <td
-                        className={`font-bold ${
-                          c.roas >= 3 ? "text-emerald-600" : c.roas >= 2 ? "text-amber-600" : "text-rose-600"
-                        }`}
-                      >
+                      <td className={roasClass(c.roas)}>
                         {Number(c.roas || 0).toFixed(2)}
                       </td>
                       <td>{c.clicks}</td>

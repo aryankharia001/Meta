@@ -29,6 +29,7 @@ import {
 import { fetchLiveAdAccounts, fetchLiveCampaigns } from "../lib/api";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import CampaignLink from "../components/CampaignLink";
+import { CampaignNameCell, RoasValue, BudgetCell } from "../components/CampaignCells";
 import KpiAnalyticsPopup from "../components/KpiAnalyticsPopup";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
@@ -182,7 +183,7 @@ export default function Dashboard() {
   const [selectedAccounts, setSelectedAccounts] = useState([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
 
-  const [presetKey, setPresetKey] = useState("7d");
+  const [presetKey, setPresetKey] = useState("today");
   const [customSince, setCustomSince] = useState(shiftDays(todayIso(), -6));
   const [customUntil, setCustomUntil] = useState(todayIso());
 
@@ -609,7 +610,7 @@ export default function Dashboard() {
                         {campaignCols.orderedColumns.map((c) => (
                           <th
                             key={c.key}
-                            className={c.sortable !== false ? "cursor-pointer select-none" : ""}
+                            className={`${c.sortable !== false ? "cursor-pointer select-none" : ""} ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""}`}
                             onClick={() => c.sortable !== false && handleSort(c.key)}
                           >
                             {c.label}
@@ -623,13 +624,13 @@ export default function Dashboard() {
                         <Fragment key={campaign.campaignId}>
                           <tr
                             onClick={() => toggleCampaign(campaign.campaignId)}
-                            className={`cursor-pointer ${expandedCampaign === campaign.campaignId ? "bg-slate-50" : ""}`}
+                            className={`row-clickable ${expandedCampaign === campaign.campaignId ? "row-selected" : ""}`}
                           >
                             {campaignCols.orderedColumns.map((c) => {
                               if (c.key === "campaignName") {
                                 return (
                                   <td key={c.key} onClick={(e) => e.stopPropagation()}>
-                                    <CampaignLink
+                                    <CampaignNameCell
                                       tokenId={TOKEN_ID}
                                       campaignId={campaign.campaignId}
                                       campaignName={campaign.campaignName}
@@ -637,19 +638,23 @@ export default function Dashboard() {
                                       accountName={adAccounts.find((a) => a.id === campaign.accountId)?.name}
                                       since={since}
                                       until={until}
+                                      status={campaign.effectiveStatus || campaign.status}
+                                      showId={false}
                                     />
+                                  </td>
+                                );
+                              }
+                              if (c.key === "budget") {
+                                return (
+                                  <td key={c.key} className="num">
+                                    <BudgetCell budget={campaign.budget} budgetType={campaign.budgetType} />
                                   </td>
                                 );
                               }
                               if (c.key === "roas") {
                                 return (
-                                  <td
-                                    key={c.key}
-                                    className={`font-bold ${
-                                      campaign.roas >= 3 ? "text-emerald-600" : campaign.roas >= 2 ? "text-amber-600" : "text-rose-600"
-                                    }`}
-                                  >
-                                    {Number(campaign.roas || 0).toFixed(2)}
+                                  <td key={c.key} className="num">
+                                    <RoasValue roas={campaign.roas} />
                                   </td>
                                 );
                               }
@@ -660,7 +665,11 @@ export default function Dashboard() {
                                   </td>
                                 );
                               }
-                              return <td key={c.key}>{c.render(campaign)}</td>;
+                              return (
+                                <td key={c.key} className={c.align === "right" ? "num" : c.align === "center" ? "center" : ""}>
+                                  {c.render(campaign)}
+                                </td>
+                              );
                             })}
                           </tr>
 
@@ -675,9 +684,9 @@ export default function Dashboard() {
                                     <thead>
                                       <tr>
                                         <th>Order ID</th>
-                                        <th>Amount</th>
-                                        <th>Payment</th>
-                                        <th>Status</th>
+                                        <th className="num">Amount</th>
+                                        <th className="center">Payment</th>
+                                        <th className="center">Status</th>
                                         <th>Order Date</th>
                                         <th>Created At</th>
                                       </tr>
@@ -693,19 +702,19 @@ export default function Dashboard() {
                                       {campaign.orderList.map((order) => (
                                         <tr
                                           key={order.orderId}
-                                          className="cursor-pointer"
+                                          className="row-clickable"
                                           onClick={() => openOrder({ orderId: order.orderId, tokenId: TOKEN_ID })}
                                         >
-                                          <td>{order.orderId}</td>
-                                          <td>{currency(order.totalAmountPayable)}</td>
-                                          <td>
+                                          <td className="metric-primary">{order.orderId}</td>
+                                          <td className="num metric-primary">{currency(order.totalAmountPayable)}</td>
+                                          <td className="center">
                                             <span
                                               className={`badge ${order.paymentType === "PREPAID" ? "badge-blue" : "badge-amber"}`}
                                             >
                                               {order.paymentType}
                                             </span>
                                           </td>
-                                          <td>{order.paymentStatus}</td>
+                                          <td className="center">{order.paymentStatus}</td>
                                           <td>{order.orderDate}</td>
                                           <td>{new Date(order.orderCreatedAt).toLocaleString()}</td>
                                         </tr>
@@ -746,7 +755,9 @@ export default function Dashboard() {
                     <thead>
                       <tr>
                         {unmatchedCols.orderedColumns.map((c) => (
-                          <th key={c.key}>{c.label}</th>
+                          <th key={c.key} className={c.align === "right" ? "num" : c.align === "center" ? "center" : ""}>
+                            {c.label}
+                          </th>
                         ))}
                       </tr>
                     </thead>
@@ -754,7 +765,7 @@ export default function Dashboard() {
                       {unmatchedOrders.map((order) => (
                         <tr
                           key={order.orderId}
-                          className="cursor-pointer"
+                          className="row-clickable"
                           onClick={() => openOrder({ orderId: order.orderId, tokenId: TOKEN_ID })}
                         >
                           {unmatchedCols.orderedColumns.map((c) => {
@@ -767,27 +778,32 @@ export default function Dashboard() {
                                     campaignName={order.campaignName}
                                     since={since}
                                     until={until}
+                                    className="campaign-name !text-slate-800"
                                   />
                                 </td>
                               );
                             }
                             if (c.key === "campaignId") {
                               return (
-                                <td key={c.key} className="text-slate-400">
+                                <td key={c.key} className="metric-secondary">
                                   {order.campaignId || "-"}
                                 </td>
                               );
                             }
                             if (c.key === "paymentType") {
                               return (
-                                <td key={c.key}>
+                                <td key={c.key} className="center">
                                   <span className={`badge ${order.paymentType === "PREPAID" ? "badge-blue" : "badge-amber"}`}>
                                     {order.paymentType}
                                   </span>
                                 </td>
                               );
                             }
-                            return <td key={c.key}>{c.render(order)}</td>;
+                            return (
+                              <td key={c.key} className={c.align === "right" ? "num" : c.align === "center" ? "center" : ""}>
+                                {c.render(order)}
+                              </td>
+                            );
                           })}
                         </tr>
                       ))}

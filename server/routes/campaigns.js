@@ -41,6 +41,23 @@ function safeInt(v) {
   return isNaN(n) ? null : n;
 }
 
+// Phase 11 — UI/display-only helper. Meta returns daily_budget/
+// lifetime_budget in the ad account's currency's minor unit (paise for
+// INR, cents for USD, etc.) — divide by 100 to get the actual currency
+// amount shown to users. Never touches spend/revenue/ROAS math above;
+// purely additive metadata for the Budget column/badge the UI now
+// shows next to Campaign Name and Spend.
+function deriveBudget(meta) {
+  if (!meta) return { budget: null, budgetType: null };
+  if (meta.daily_budget !== undefined && meta.daily_budget !== null && meta.daily_budget !== "") {
+    return { budget: Number(meta.daily_budget) / 100, budgetType: "daily" };
+  }
+  if (meta.lifetime_budget !== undefined && meta.lifetime_budget !== null && meta.lifetime_budget !== "") {
+    return { budget: Number(meta.lifetime_budget) / 100, budgetType: "lifetime" };
+  }
+  return { budget: null, budgetType: null };
+}
+
 // ─── Try multiple endpoint strategies ───────────────────────
 
 async function tryFetchCampaigns(base, actId, accessToken) {
@@ -257,6 +274,14 @@ router.get("/:tokenId/compare", async (req, res) => {
       "purchase_roas",
     ].join(",");
 
+    // Phase 11 — campaign_id -> { budget, budgetType, status, effectiveStatus },
+    // from a lightweight metadata-only call alongside the insights call
+    // already made per account below. Additive only: never read by the
+    // spend/revenue/ROAS/matching logic in this route, purely for the
+    // Budget column and the live "● LIVE" indicator the UI now shows
+    // next to Campaign Name.
+    const metaByCampaignId = new Map();
+
     for (const accountId of accountIds) {
       const actId = accountId.startsWith("act_")
         ? accountId
@@ -276,7 +301,25 @@ router.get("/:tokenId/compare", async (req, res) => {
         `&limit=500` +
         `&access_token=${token.accessToken}`;
 
-      const data = await fbGet(url);
+      const metaUrl =
+        `https://graph.facebook.com/v19.0/${actId}/campaigns` +
+        `?fields=${encodeURIComponent("id,daily_budget,lifetime_budget,status,effective_status")}&limit=200&access_token=${token.accessToken}`;
+
+      const [data, metaData] = await Promise.all([
+        fbGet(url),
+        fetchAllPages(metaUrl).catch((err) => {
+          console.log(`Budget/status metadata fetch failed for ${actId}: ${err.message}`);
+          return [];
+        }),
+      ]);
+
+      metaData.forEach((c) => {
+        metaByCampaignId.set(String(c.id), {
+          ...deriveBudget(c),
+          status: c.status || null,
+          effectiveStatus: c.effective_status || null,
+        });
+      });
 
       (data.data || []).forEach((campaign) => {
         fbCampaigns.push({
@@ -378,6 +421,9 @@ if (campaignOrders.length) {
       totalClicks += clicks;
       totalImpressions += impressions;
 
+      const meta = metaByCampaignId.get(campaignId) || {};
+      const { budget = null, budgetType = null, status = null, effectiveStatus = null } = meta;
+
       return {
         accountId: campaign.accountId,
 
@@ -385,6 +431,11 @@ if (campaignOrders.length) {
 
         campaignName:
           campaign.campaign_name,
+
+        budget,
+        budgetType,
+        status,
+        effectiveStatus,
 
         spend,
 
@@ -647,6 +698,8 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       "status",
       "effective_status",
       "buying_type",
+      "daily_budget",
+      "lifetime_budget",
       "start_time",
       "stop_time",
       "created_time",
@@ -732,6 +785,8 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       .map(shapeOrderForDrawer)
       .sort((a, b) => new Date(b.orderCreatedAt || 0) - new Date(a.orderCreatedAt || 0));
 
+    const { budget, budgetType } = deriveBudget(campaignMeta);
+
     res.json({
       success: true,
       campaign: {
@@ -741,6 +796,8 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
         status: campaignMeta?.status || null,
         effectiveStatus: campaignMeta?.effective_status || null,
         buyingType: campaignMeta?.buying_type || null,
+        budget,
+        budgetType,
         startTime: campaignMeta?.start_time || null,
         stopTime: campaignMeta?.stop_time || null,
         createdTime: campaignMeta?.created_time || null,

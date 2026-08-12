@@ -7,15 +7,14 @@ import {
   Gauge,
   PiggyBank,
   Building2,
-  AlertTriangle,
   Clock,
   Loader2,
 } from "lucide-react";
-import { fetchLiveCampaignExplorer, fetchCampaignExplorer } from "../../lib/api";
+import { fetchLiveCampaignExplorer } from "../../lib/api";
 import { getCachedLiveExplorer, setCachedLiveExplorer } from "../../lib/campaignExplorerCache";
 import { useLiveSync } from "../../lib/LiveSyncContext";
 import { currency, number, percent, multiplier, formatDateTime } from "../../lib/format";
-import { computeCampaignHealth, computeCampaignAlerts } from "../../lib/campaignHealth";
+import { LiveIndicator, RoasValue, BudgetCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — Live Campaign Monitoring. A self-contained section at the
@@ -90,7 +89,6 @@ function KpiChip({ icon: Icon, label, value, accent }) {
 export default function LiveMonitoringSection({ tokenId, accountIds, onOpenCampaign }) {
   const liveSync = useLiveSync();
   const [liveData, setLiveData] = useState(() => (tokenId && accountIds.length ? getCachedLiveExplorer(tokenId, accountIds) : null));
-  const [yesterday, setYesterday] = useState(null);
   const [loading, setLoading] = useState(!liveData);
   const [error, setError] = useState("");
   const [filterKey, setFilterKey] = useState("live");
@@ -107,14 +105,6 @@ export default function LiveMonitoringSection({ tokenId, accountIds, onOpenCampa
       })
       .catch((err) => setError(err.message || "Failed to load live campaigns"))
       .finally(() => setLoading(false));
-
-    // Yesterday snapshot, purely for spike/drop alert comparison — same
-    // main list endpoint, just a different date, cheap and cached
-    // server-side too.
-    const y = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    fetchCampaignExplorer(tokenId, { accountIds, since: y, until: y })
-      .then((res) => setYesterday(new Map((res.campaigns || []).map((c) => [c.campaignId, c]))))
-      .catch(() => setYesterday(null));
   };
 
   useEffect(() => {
@@ -132,18 +122,6 @@ export default function LiveMonitoringSection({ tokenId, accountIds, onOpenCampa
 
   const pool = liveData?.allCampaigns || [];
   const filtered = useMemo(() => pool.filter((c) => matchesLiveFilter(c, filterKey)), [pool, filterKey]);
-
-  const alerts = useMemo(() => {
-    if (!liveData) return [];
-    const list = [];
-    (liveData.campaigns || []).forEach((c) => {
-      const previous = yesterday?.get(c.campaignId) || null;
-      computeCampaignAlerts(c, { previous }).forEach((a) =>
-        list.push({ ...a, campaignId: c.campaignId, campaignName: c.campaignName, accountId: c.accountId, accountName: c.accountName })
-      );
-    });
-    return list.sort((a, b) => (a.severity === "rose" ? -1 : 1) - (b.severity === "rose" ? -1 : 1));
-  }, [liveData, yesterday]);
 
   // Campaign rows here (both the alerts list and allCampaigns) carry
   // campaignId/accountId/accountName but not tokenId (implicit in this
@@ -189,34 +167,6 @@ export default function LiveMonitoringSection({ tokenId, accountIds, onOpenCampa
             <KpiChip icon={PiggyBank} label="Profit Today" value={currency(liveData.summary.profitToday)} accent="bg-emerald-50 text-emerald-600" />
             <KpiChip icon={Building2} label="Active Ad Accounts" value={number(liveData.summary.activeAdAccounts)} accent="bg-slate-100 text-slate-500" />
           </div>
-
-          {alerts.length > 0 && (
-            <div className="card mb-4">
-              <h3 className="flex items-center gap-2 font-display font-semibold text-sm text-slate-700 mb-2.5">
-                <AlertTriangle size={14} className="text-amber-500" /> Alerts <span className="text-slate-400 font-normal">({alerts.length})</span>
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {alerts.map((a, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={() => openWithContext(a)}
-                    className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border ${
-                      a.severity === "rose"
-                        ? "bg-rose-50 border-rose-200 text-rose-700"
-                        : a.severity === "amber"
-                        ? "bg-amber-50 border-amber-200 text-amber-700"
-                        : "bg-sky-50 border-sky-200 text-sky-700"
-                    } hover:opacity-80`}
-                    title="Open this campaign"
-                  >
-                    <span className="font-medium truncate max-w-[140px]">{a.campaignName}</span>
-                    <span className="opacity-70">— {a.message}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
 
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <div className="flex flex-wrap gap-1.5">
@@ -283,9 +233,12 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
   const handleSort = (key) => setSortConfig((prev) => ({ key, direction: prev.key === key && prev.direction === "asc" ? "desc" : "asc" }));
   const arrow = (key) => (sortConfig.key !== key ? "" : sortConfig.direction === "asc" ? " ↑" : " ↓");
 
+  const NUM_KEYS = new Set(["spend", "reach", "impressions", "clicks", "ctr", "cpc", "cpm", "totalOrders", "revenue", "codOrders", "prepaidOrders", "delivered", "pending", "roas", "aov"]);
+
   const COLS = [
-    { key: "campaignName", label: "Campaign" },
+    { key: "campaignName", label: "Campaign", defaultWidth: 220 },
     { key: "accountName", label: "Ad Account" },
+    { key: "budget", label: "Budget" },
     { key: "spend", label: "Spend Today", render: (c) => currency(c.spend) },
     { key: "reach", label: "Reach", render: (c) => number(c.reach) },
     { key: "impressions", label: "Impressions", render: (c) => number(c.impressions) },
@@ -299,7 +252,7 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
     { key: "prepaidOrders", label: "Prepaid", render: (c) => number(c.prepaidOrders) },
     { key: "delivered", label: "Delivered", render: (c) => number(c.delivered) },
     { key: "pending", label: "Pending", render: (c) => number(c.pending) },
-    { key: "roas", label: "ROAS", render: (c) => multiplier(c.roas) },
+    { key: "roas", label: "ROAS", render: (c) => <RoasValue roas={c.roas} /> },
     { key: "aov", label: "AOV", render: (c) => currency(c.aov) },
   ];
 
@@ -308,9 +261,13 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
       <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
         <thead className="sticky top-0 z-[1]">
           <tr>
-            <th className="sticky left-0 z-[2] bg-slate-50" style={{ width: 40 }} />
             {COLS.map((c) => (
-              <th key={c.key} className="cursor-pointer select-none" style={{ minWidth: 110 }} onClick={() => handleSort(c.key)}>
+              <th
+                key={c.key}
+                className={`cursor-pointer select-none ${NUM_KEYS.has(c.key) ? "num" : ""} ${c.key === "campaignName" ? "sticky left-0 z-[2] bg-slate-50" : ""}`}
+                style={{ minWidth: c.defaultWidth || 110 }}
+                onClick={() => handleSort(c.key)}
+              >
                 {c.label}
                 {arrow(c.key)}
               </th>
@@ -320,26 +277,39 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
         <tbody>
           {sorted.length === 0 ? (
             <tr>
-              <td colSpan={COLS.length + 1} className="text-center py-10 text-sm text-slate-400">
+              <td colSpan={COLS.length} className="text-center py-10 text-sm text-slate-400">
                 No campaigns match this filter.
               </td>
             </tr>
           ) : (
-            sorted.map((c) => {
-              const health = computeCampaignHealth(c);
-              return (
-                <tr key={c.campaignId} className="cursor-pointer hover:bg-slate-50/70" onClick={() => onOpenCampaign?.(c)}>
-                  <td className="sticky left-0 z-[1] bg-white text-center" title={health.label}>
-                    {health.emoji}
-                  </td>
-                  {COLS.map((col) => (
-                    <td key={col.key} className={col.key === "campaignName" ? "font-medium text-slate-700" : ""}>
+            sorted.map((c) => (
+              <tr key={c.campaignId} className="row-clickable hover:bg-slate-50/70" onClick={() => onOpenCampaign?.(c)}>
+                {COLS.map((col) => {
+                  if (col.key === "campaignName") {
+                    return (
+                      <td key={col.key} className="sticky left-0 z-[1] bg-white">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="campaign-name truncate max-w-[170px]">{c.campaignName}</span>
+                          <LiveIndicator campaign={c} />
+                        </div>
+                      </td>
+                    );
+                  }
+                  if (col.key === "budget") {
+                    return (
+                      <td key={col.key}>
+                        <BudgetCell budget={c.budget} budgetType={c.budgetType} />
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={col.key} className={NUM_KEYS.has(col.key) ? "num" : ""}>
                       {col.render ? col.render(c) : c[col.key]}
                     </td>
-                  ))}
-                </tr>
-              );
-            })
+                  );
+                })}
+              </tr>
+            ))
           )}
         </tbody>
       </table>

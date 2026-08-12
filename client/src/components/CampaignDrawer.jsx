@@ -36,6 +36,8 @@ import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
 import { currency, number, percent, multiplier, formatDate, formatDateTime } from "../lib/format";
+import { statusBadgeClass, roasClass, formatBudget } from "../lib/campaignDisplay";
+import { LiveIndicator } from "./CampaignCells";
 import InfoModal from "./InfoModal";
 import FavoriteButton from "./FavoriteButton";
 import EntityNotesPanel from "./EntityNotesPanel";
@@ -61,20 +63,10 @@ const ACCENTS = {
   slate: "bg-slate-100 text-slate-500",
 };
 
-const STATUS_BADGE = {
-  ACTIVE: "badge-green",
-  PAUSED: "badge-amber",
-  CAMPAIGN_PAUSED: "badge-amber",
-  ADSET_PAUSED: "badge-amber",
-  ARCHIVED: "badge-slate",
-  DELETED: "badge-rose",
-  IN_PROCESS: "badge-blue",
-  WITH_ISSUES: "badge-rose",
-  PENDING_REVIEW: "badge-blue",
-  DISAPPROVED: "badge-rose",
-  PENDING_BILLING_INFO: "badge-amber",
-};
-const statusBadgeClass = (status) => STATUS_BADGE[status] || "badge-slate";
+// Phase 11 — campaign status badge now uses the shared statusBadgeClass()
+// from lib/campaignDisplay.js, so this drawer's badge colors (green/red/
+// neutral gray only, no amber/orange) match every other campaign status
+// indicator in the app.
 
 // Same lowercase/trim/collapse-whitespace normalization used elsewhere
 // (KpiAnalyticsPopup's matched/unmatched/outside-range classification) —
@@ -439,6 +431,7 @@ export default function CampaignDrawer() {
       ["Campaign Name", c.name],
       ["Campaign ID", c.id],
       ["Status", c.status || "N/A"],
+      ["Budget", formatBudget(c.budget, c.budgetType) || "N/A"],
       ["Objective", c.objective || "N/A"],
       ["Buying Type", c.buyingType || "N/A"],
       ["Ad Account", activeCampaign?.accountName || c.accountId || "N/A"],
@@ -513,8 +506,11 @@ export default function CampaignDrawer() {
                       {details.campaign.name}
                     </h2>
                     {details.campaign.status && (
-                      <span className={`badge ${statusBadgeClass(details.campaign.status)}`}>{details.campaign.status}</span>
+                      <span className={`badge ${statusBadgeClass(details.campaign.effectiveStatus || details.campaign.status)}`}>
+                        {details.campaign.status}
+                      </span>
                     )}
+                    <LiveIndicator status={details.campaign.effectiveStatus || details.campaign.status} />
                     {!details.campaign.metaAvailable && (
                       <span className="badge badge-slate" title="Meta didn't return metadata for this campaign ID">
                         Meta data unavailable
@@ -571,6 +567,7 @@ export default function CampaignDrawer() {
 
               {/* Campaign info strip */}
               <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-xs text-slate-500">
+                <InfoBit icon={Wallet} label="Budget" value={formatBudget(details.campaign.budget, details.campaign.budgetType) || "N/A"} />
                 <InfoBit icon={Target} label="Objective" value={details.campaign.objective || "N/A"} />
                 <InfoBit icon={Tag} label="Buying Type" value={details.campaign.buyingType || "N/A"} />
                 <InfoBit icon={Building2} label="Ad Account" value={activeCampaign?.accountName || details.campaign.accountId || "N/A"} />
@@ -601,7 +598,11 @@ export default function CampaignDrawer() {
                       </span>
                       <div className="min-w-0">
                         <div className="text-[12px] text-slate-500 leading-tight truncate">{def.label}</div>
-                        <div className="text-lg font-display font-bold text-slate-800 truncate">
+                        <div
+                          className={`text-lg font-display font-bold truncate ${
+                            def.key === "roas" && kpiValues?.roas != null ? roasClass(kpiValues.roas) : "text-slate-800"
+                          }`}
+                        >
                           {kpiValues ? def.format(kpiValues[def.key]) : "N/A"}
                         </div>
                       </div>

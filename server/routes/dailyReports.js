@@ -51,7 +51,7 @@ async function fetchAllPages(url) {
 }
 
 async function tryFetchCampaigns(actId, accessToken) {
-  const campaignFields = ["id", "name", "status", "effective_status"].join(",");
+  const campaignFields = ["id", "name", "status", "effective_status", "daily_budget", "lifetime_budget"].join(",");
   try {
     const raw = await fetchAllPages(
       `https://graph.facebook.com/v19.0/${actId}/campaigns?fields=${encodeURIComponent(campaignFields)}&limit=200&access_token=${accessToken}`
@@ -91,6 +91,21 @@ const normalizeCampaignName = (name) =>
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
+
+// Phase 11 — UI/display-only helper (identical convention to the copies
+// in campaigns.js/campaignExplorer.js). Meta returns daily_budget/
+// lifetime_budget in the ad account's currency's minor unit — divide by
+// 100 for the real amount. Never used in spend/revenue/ROAS/matching math.
+function deriveBudget(meta) {
+  if (!meta) return { budget: null, budgetType: null };
+  if (meta.daily_budget !== undefined && meta.daily_budget !== null && meta.daily_budget !== "") {
+    return { budget: Number(meta.daily_budget) / 100, budgetType: "daily" };
+  }
+  if (meta.lifetime_budget !== undefined && meta.lifetime_budget !== null && meta.lifetime_budget !== "") {
+    return { budget: Number(meta.lifetime_budget) / 100, budgetType: "lifetime" };
+  }
+  return { budget: null, budgetType: null };
+}
 
 function extractDeliveryStatus(raw) {
   return (
@@ -181,7 +196,7 @@ function enumerateDays(since, until) {
   return days;
 }
 
-function buildRow({ date, campaignId, campaignName, accountId, accountName, status, effectiveStatus, spend, orders, isUnmatched = false }) {
+function buildRow({ date, campaignId, campaignName, accountId, accountName, status, effectiveStatus, budget = null, budgetType = null, spend, orders, isUnmatched = false }) {
   const totalOrders = orders.length;
   const revenue = orders.reduce((s, o) => s + Number(o.totalAmountPayable || 0), 0);
   let codOrders = 0,
@@ -218,6 +233,8 @@ function buildRow({ date, campaignId, campaignName, accountId, accountName, stat
     accountName: accountName || null,
     status: status || null,
     effectiveStatus: effectiveStatus || null,
+    budget,
+    budgetType,
     isUnmatched,
 
     spend: Math.round(spendNum * 100) / 100,
@@ -348,12 +365,15 @@ router.get("/:tokenId", async (req, res) => {
       ]);
 
       metaList.forEach((c) => {
+        const { budget, budgetType } = deriveBudget(c);
         campaignMeta.set(String(c.id), {
           name: c.name,
           accountId,
           accountName: accountNameMap.get(accountId) || accountId,
           status: c.status || null,
           effectiveStatus: c.effective_status || null,
+          budget,
+          budgetType,
         });
       });
 
@@ -434,6 +454,8 @@ router.get("/:tokenId", async (req, res) => {
             accountName: meta.accountName,
             status: meta.status,
             effectiveStatus: meta.effectiveStatus,
+            budget: meta.budget,
+            budgetType: meta.budgetType,
             spend: insightsByDayCampaign.get(`${date}|${campaignId}`) || 0,
             orders: campaignOrders,
           })
@@ -503,6 +525,8 @@ router.get("/:tokenId/detail", async (req, res) => {
     }
 
     let spend = 0;
+    let budget = null;
+    let budgetType = null;
     if (!isUnmatched) {
       for (const acc of candidateAccountIds) {
         const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
@@ -520,6 +544,23 @@ router.get("/:tokenId/detail", async (req, res) => {
           }
         } catch (err) {
           console.log(`Daily detail insight fetch failed for ${actId}: ${err.message}`);
+        }
+      }
+
+      // Phase 11 — Budget for this campaign's info strip, same tryFetchCampaigns
+      // metadata call (now including daily_budget/lifetime_budget) used
+      // elsewhere in this file. Additive only, doesn't affect spend above.
+      for (const acc of candidateAccountIds) {
+        const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
+        try {
+          const list = await tryFetchCampaigns(actId, token.accessToken);
+          const hit = list.find((c) => String(c.id) === String(campaignId));
+          if (hit) {
+            ({ budget, budgetType } = deriveBudget(hit));
+            break;
+          }
+        } catch (err) {
+          console.log(`Daily detail budget fetch failed for ${actId}: ${err.message}`);
         }
       }
     }
@@ -561,6 +602,8 @@ router.get("/:tokenId/detail", async (req, res) => {
       accountName: null,
       status: null,
       effectiveStatus: null,
+      budget,
+      budgetType,
       spend,
       orders: matchingOrders,
       isUnmatched,

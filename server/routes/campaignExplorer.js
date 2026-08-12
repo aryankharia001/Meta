@@ -109,6 +109,36 @@ function extractProducts(raw) {
     .filter(Boolean);
 }
 
+// Phase 11 — same line-item probing as extractProducts() above, but also
+// carrying quantity, for the Products/Units Sold columns the redesigned
+// Campaign Explorer table now surfaces (same field-probing convention
+// dailyReports.js's extractProductLines already established). Additive
+// only — doesn't change extractProducts() or anything that reads it.
+function extractProductLines(raw) {
+  const items =
+    raw?.cart_data?.line_items || raw?.line_items || raw?.products || raw?.items || raw?.cart_data?.products;
+  if (!Array.isArray(items) || items.length === 0) return [];
+  return items.map((i) => ({
+    name: i?.name || i?.product_name || i?.title || "Unknown product",
+    quantity: i?.quantity != null ? Number(i.quantity) : i?.qty != null ? Number(i.qty) : 1,
+  }));
+}
+
+// Phase 11 — UI/display-only helper (identical convention to the copy in
+// campaigns.js). Meta returns daily_budget/lifetime_budget in the ad
+// account's currency's minor unit — divide by 100 for the real amount.
+// Never used in spend/revenue/ROAS/matching math anywhere in this file.
+function deriveBudget(meta) {
+  if (!meta) return { budget: null, budgetType: null };
+  if (meta.daily_budget !== undefined && meta.daily_budget !== null && meta.daily_budget !== "") {
+    return { budget: Number(meta.daily_budget) / 100, budgetType: "daily" };
+  }
+  if (meta.lifetime_budget !== undefined && meta.lifetime_budget !== null && meta.lifetime_budget !== "") {
+    return { budget: Number(meta.lifetime_budget) / 100, budgetType: "lifetime" };
+  }
+  return { budget: null, budgetType: null };
+}
+
 // Six buckets instead of analyticsUtils.js's five — Phase 8 explicitly
 // asks for "Processing" split out from "Pending", so this local copy
 // diverges from the client-side deliveryBucket() on purpose.
@@ -283,6 +313,8 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
     const stateCounts = new Map();
     const phoneOrderCounts = new Map();
     let lastOrderAt = null; // most recent orderCreatedAt among this campaign's orders — feeds the "no orders in last 6h" alert
+    const distinctProducts = new Set(); // Phase 11 — Products/Units Sold columns
+    let unitsSold = 0;
 
     campaignOrders.forEach((o) => {
       const amount = Number(o.totalAmountPayable || 0);
@@ -306,6 +338,10 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       delivery[deliveryBucket6(extractDeliveryStatus(o.raw))] += 1;
 
       extractProducts(o.raw).forEach((p) => productCounts.set(p, (productCounts.get(p) || 0) + 1));
+      extractProductLines(o.raw).forEach((line) => {
+        distinctProducts.add(line.name);
+        unitsSold += line.quantity;
+      });
       if (o.address?.city) cityCounts.set(o.address.city, (cityCounts.get(o.address.city) || 0) + 1);
       if (o.address?.state) stateCounts.set(o.address.state, (stateCounts.get(o.address.state) || 0) + 1);
       if (o.phone) phoneOrderCounts.set(o.phone, (phoneOrderCounts.get(o.phone) || 0) + 1);
@@ -321,6 +357,7 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
 
     const profit = revenue - spend;
     const roas = spend ? revenue / spend : 0;
+    const { budget, budgetType } = deriveBudget(meta);
 
     return {
       campaignId,
@@ -331,6 +368,8 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       status: meta.status || null,
       effectiveStatus: meta.effective_status || null,
       buyingType: meta.buying_type || null,
+      budget,
+      budgetType,
       startTime,
       stopTime,
       createdTime: meta.created_time || null,
@@ -353,6 +392,9 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
 
       codOrders, codRevenue: Math.round(codRevenue * 100) / 100,
       prepaidOrders, prepaidRevenue: Math.round(prepaidRevenue * 100) / 100,
+
+      totalProductsSold: distinctProducts.size,
+      totalUnitsSold: unitsSold,
 
       delivered: delivery.delivered,
       pending: delivery.pending,

@@ -3,6 +3,7 @@ import { X, AlertTriangle, RefreshCw, Inbox, Search, Download } from "lucide-rea
 import { fetchDailyDetail } from "../../lib/api";
 import { currency, number, multiplier, formatDateTime } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
+import { formatBudget, roasClass } from "../../lib/campaignDisplay";
 import { downloadCsv } from "../../lib/csv";
 import { useOrderDrawer } from "../../lib/OrderDrawerContext";
 
@@ -128,10 +129,11 @@ export default function DailyDrawer({ meta, onClose }) {
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <Stat label="24h Window" value={`${displayMeta.date} 00:00 → 23:59 IST`} wide />
+                  <Stat label="Budget" value={formatBudget(data.metrics.budget, data.metrics.budgetType) || "N/A"} />
                   <Stat label="Spend" value={currency(data.metrics.spend)} />
                   <Stat label="Orders" value={number(data.metrics.orders)} />
                   <Stat label="Revenue" value={currency(data.metrics.revenue)} />
-                  <Stat label="ROAS" value={multiplier(data.metrics.roas)} />
+                  <Stat label="ROAS" value={multiplier(data.metrics.roas)} valueClassName={roasClass(data.metrics.roas)} />
                   <Stat label="COD Orders" value={number(data.metrics.codOrders)} />
                   <Stat label="Prepaid Orders" value={number(data.metrics.prepaidOrders)} />
                   <Stat label="Avg Order Value" value={currency(data.metrics.aov)} />
@@ -225,11 +227,11 @@ export default function DailyDrawer({ meta, onClose }) {
   );
 }
 
-function Stat({ label, value, wide }) {
+function Stat({ label, value, wide, valueClassName }) {
   return (
     <div className={`card !p-3.5 ${wide ? "col-span-2 sm:col-span-4" : ""}`}>
       <div className="text-[11px] text-slate-500 mb-0.5">{label}</div>
-      <div className="text-base font-display font-bold text-slate-800 truncate">{value}</div>
+      <div className={`text-base font-display font-bold text-slate-800 truncate ${valueClassName || ""}`}>{value}</div>
     </div>
   );
 }

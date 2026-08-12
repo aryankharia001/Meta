@@ -4,6 +4,7 @@ import { SectionHeading, Leaderboard } from "./chartKit";
 import { currency, number, multiplier, percent } from "../../lib/format";
 import { downloadCsv } from "../../lib/csv";
 import CampaignLink from "../CampaignLink";
+import { LiveIndicator, RoasValue, BudgetCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Campaign Performance — leaderboards sourced from the existing,
@@ -71,17 +72,25 @@ export default function CampaignSection({ campaignData, tokenId, since, until })
   const row = (metricKey, formatMetric) => (c) => (
     <tr key={c.campaignId}>
       <td>
-        <CampaignLink tokenId={tokenId} campaignId={c.campaignId} campaignName={c.campaignName} accountId={c.accountId} since={since} until={until} />
+        <div className="flex items-center gap-2 min-w-0">
+          <CampaignLink tokenId={tokenId} campaignId={c.campaignId} campaignName={c.campaignName} accountId={c.accountId} since={since} until={until} className="campaign-name truncate max-w-[170px]" />
+          <LiveIndicator status={c.effectiveStatus || c.status} />
+        </div>
       </td>
-      <td>{currency(c.spend)}</td>
-      <td>{currency(c.revenue)}</td>
-      <td className={`font-semibold ${c.roas >= 3 ? "text-emerald-600" : c.roas >= 2 ? "text-amber-600" : "text-rose-600"}`}>{multiplier(c.roas)}</td>
-      <td>{number(c.orders)}</td>
-      <td className="font-semibold text-slate-700">{formatMetric ? formatMetric(c[metricKey]) : c[metricKey]}</td>
+      <td className="num">
+        <BudgetCell budget={c.budget} budgetType={c.budgetType} />
+      </td>
+      <td className="num metric-primary">{currency(c.spend)}</td>
+      <td className="num metric-primary">{currency(c.revenue)}</td>
+      <td className="num">
+        <RoasValue roas={c.roas} />
+      </td>
+      <td className="num">{number(c.orders)}</td>
+      <td className="num font-semibold text-slate-700">{formatMetric ? formatMetric(c[metricKey]) : c[metricKey]}</td>
     </tr>
   );
 
-  const columns = (metricLabel) => ["Campaign", "Spend", "Revenue", "ROAS", "Orders", metricLabel];
+  const columns = (metricLabel) => ["Campaign", "Budget", "Spend", "Revenue", "ROAS", "Orders", metricLabel];
 
   return (
     <div className="space-y-5 mb-8">

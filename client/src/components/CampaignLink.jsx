@@ -39,7 +39,7 @@ export default function CampaignLink({
   return (
     <button
       type="button"
-      className={`text-left font-medium text-slate-700 hover:text-blue-600 hover:underline underline-offset-2 decoration-slate-300 transition-colors cursor-pointer ${className}`}
+      className={`text-left font-semibold text-slate-700 hover:text-blue-600 hover:underline underline-offset-2 decoration-slate-300 transition-colors cursor-pointer ${className}`}
       onClick={(e) => {
         e.stopPropagation();
         openCampaign({ tokenId, campaignId, campaignName, accountId, accountName, since, until });

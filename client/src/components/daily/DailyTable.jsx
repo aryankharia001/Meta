@@ -4,8 +4,9 @@ import { DAILY_COLUMNS, DAILY_DEFAULT_HIDDEN } from "../../lib/dailyColumns";
 import { useColumnPrefs } from "../../lib/useColumnPrefs";
 import ColumnSettingsMenu from "../ColumnSettingsMenu";
 import { downloadCsv } from "../../lib/csv";
-import { currency, number, multiplier } from "../../lib/format";
+import { currency, number } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
+import { LiveIndicator, RoasValue, StatusPill } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 — the Daily page's main table. Two view modes over the same
@@ -50,13 +51,13 @@ function compareRows(a, b, key, direction) {
 // which reads off `d.date` directly.
 const DAY_ROLLUP_COLUMNS = [
   { key: "date", label: "Date", width: 140 },
-  { key: "campaignCount", label: "Campaigns", width: 100 },
-  { key: "spend", label: "Spend", width: 110 },
-  { key: "orders", label: "Orders", width: 90 },
-  { key: "revenue", label: "Revenue", width: 110 },
-  { key: "roas", label: "ROAS", width: 90 },
-  { key: "codOrders", label: "COD", width: 100 },
-  { key: "prepaidOrders", label: "Prepaid", width: 100 },
+  { key: "campaignCount", label: "Campaigns", width: 100, align: "right" },
+  { key: "spend", label: "Spend", width: 110, align: "right" },
+  { key: "orders", label: "Orders", width: 90, align: "right" },
+  { key: "revenue", label: "Revenue", width: 110, align: "right" },
+  { key: "roas", label: "ROAS", width: 90, align: "right" },
+  { key: "codOrders", label: "COD", width: 100, align: "right" },
+  { key: "prepaidOrders", label: "Prepaid", width: 100, align: "right" },
 ];
 
 export default function DailyTable({ days, onOpenRow }) {
@@ -212,6 +213,39 @@ function rawValue(row, key) {
   return row[key] ?? "";
 }
 
+// Shared per-column cell renderer for both Grouped (campaign sub-table)
+// and Flat views — special-cases Campaign Name (bold + live indicator),
+// Status (green/red/neutral pill) and ROAS (2.4 threshold color) so
+// every render of DAILY_COLUMNS looks identical no matter which view
+// mode it's in, while every other column still uses its own col.render.
+function DailyRowCell({ col, row }) {
+  const alignClass = col.align === "right" ? "num" : col.align === "center" ? "center" : "";
+
+  if (col.key === "campaignName") {
+    return (
+      <td>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`truncate max-w-[200px] ${row.isUnmatched ? "font-medium text-slate-500" : "campaign-name"}`}>
+            {row.campaignName || "N/A"}
+          </span>
+          {!row.isUnmatched && <LiveIndicator status={row.effectiveStatus || row.status} />}
+        </div>
+      </td>
+    );
+  }
+  if (col.key === "status") {
+    return <td className="center">{row.isUnmatched ? <span className="badge badge-slate">Unmatched</span> : <StatusPill status={row.effectiveStatus || row.status} />}</td>;
+  }
+  if (col.key === "roas") {
+    return (
+      <td className="num">
+        <RoasValue roas={row.roas} />
+      </td>
+    );
+  }
+  return <td className={alignClass}>{col.render ? col.render(row) : row[col.key]}</td>;
+}
+
 function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySortConfig, onDaySort, dayArrow, sortConfig, onSort, arrow }) {
   return (
     <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
@@ -221,7 +255,7 @@ function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySo
           {DAY_ROLLUP_COLUMNS.map((c) => (
             <th
               key={c.key}
-              className="cursor-pointer select-none hover:text-blue-600"
+              className={`cursor-pointer select-none hover:text-blue-600 ${c.align === "right" ? "num" : ""}`}
               style={{ width: c.width }}
               onClick={() => onDaySort(c.key)}
               title="Sort"
@@ -238,18 +272,18 @@ function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySo
           const sortedCampaigns = [...d.campaigns].sort((a, b) => compareRows(a, b, sortConfig.key, sortConfig.direction));
           return (
             <Fragment key={d.date}>
-              <tr className="cursor-pointer bg-slate-50/60 hover:bg-slate-100/70 font-medium" onClick={() => onToggleExpand(d.date)}>
+              <tr className={`row-clickable bg-slate-50/60 hover:bg-slate-100/70 ${isOpen ? "row-selected" : ""}`} onClick={() => onToggleExpand(d.date)}>
                 <td className="text-slate-400">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
-                <td className="text-slate-800">{formatDayLabel(d.date)}</td>
-                <td>{number(d.totals.campaignCount)}</td>
-                <td>{currency(d.totals.spend)}</td>
-                <td>{number(d.totals.orders)}</td>
-                <td>{currency(d.totals.revenue)}</td>
-                <td className={`font-bold ${d.totals.roas >= 3 ? "text-emerald-600" : d.totals.roas >= 2 ? "text-amber-600" : "text-rose-600"}`}>
-                  {multiplier(d.totals.roas)}
+                <td className="metric-primary">{formatDayLabel(d.date)}</td>
+                <td className="num">{number(d.totals.campaignCount)}</td>
+                <td className="num metric-primary">{currency(d.totals.spend)}</td>
+                <td className="num">{number(d.totals.orders)}</td>
+                <td className="num metric-primary">{currency(d.totals.revenue)}</td>
+                <td className="num">
+                  <RoasValue roas={d.totals.roas} />
                 </td>
-                <td>{number(d.totals.codOrders)}</td>
-                <td>{number(d.totals.prepaidOrders)}</td>
+                <td className="num">{number(d.totals.codOrders)}</td>
+                <td className="num">{number(d.totals.prepaidOrders)}</td>
               </tr>
               {isOpen && (
                 <tr>
@@ -261,7 +295,7 @@ function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySo
                             {columns.map((c) => (
                               <th
                                 key={c.key}
-                                className="cursor-pointer select-none hover:text-blue-600"
+                                className={`cursor-pointer select-none hover:text-blue-600 ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""}`}
                                 style={{ width: c.defaultWidth }}
                                 onClick={() => onSort(c.key)}
                                 title="Sort"
@@ -276,11 +310,11 @@ function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySo
                           {sortedCampaigns.map((row) => (
                             <tr
                               key={`${row.date}-${row.campaignId || "unmatched"}`}
-                              className={`cursor-pointer ${row.isUnmatched ? "text-slate-500" : ""}`}
+                              className="row-clickable"
                               onClick={() => onOpenRow(row)}
                             >
                               {columns.map((c) => (
-                                <td key={c.key}>{c.render ? c.render(row) : row[c.key]}</td>
+                                <DailyRowCell key={c.key} col={c} row={row} />
                               ))}
                             </tr>
                           ))}
@@ -306,7 +340,7 @@ function FlatView({ rows, columns, sortConfig, onSort, arrow, onOpenRow }) {
           {columns.map((c) => (
             <th
               key={c.key}
-              className="cursor-pointer select-none hover:text-blue-600"
+              className={`cursor-pointer select-none hover:text-blue-600 ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""}`}
               style={{ width: c.defaultWidth }}
               onClick={() => onSort(c.key)}
               title="Sort"
@@ -319,9 +353,9 @@ function FlatView({ rows, columns, sortConfig, onSort, arrow, onOpenRow }) {
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={`${row.date}-${row.campaignId || "unmatched"}`} className={`cursor-pointer ${row.isUnmatched ? "text-slate-500" : ""}`} onClick={() => onOpenRow(row)}>
+          <tr key={`${row.date}-${row.campaignId || "unmatched"}`} className="row-clickable" onClick={() => onOpenRow(row)}>
             {columns.map((c) => (
-              <td key={c.key}>{c.render ? c.render(row) : row[c.key]}</td>
+              <DailyRowCell key={c.key} col={c} row={row} />
             ))}
           </tr>
         ))}

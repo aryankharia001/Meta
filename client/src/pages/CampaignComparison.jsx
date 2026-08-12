@@ -6,6 +6,7 @@ import { useSelectedToken } from "../lib/useSelectedToken";
 import CampaignLink from "../components/CampaignLink";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
+import { roasClass } from "../lib/campaignDisplay";
 
 export default function CampaignComparison() {
   const { tokenId: TOKEN_ID, setTokenId, tokens } = useSelectedToken();
@@ -440,13 +441,7 @@ export default function CampaignComparison() {
                     </td>
 
                     <td
-                      className={`font-bold ${
-                        campaign.roas >= 3
-                          ? "text-emerald-600"
-                          : campaign.roas >= 2
-                          ? "text-amber-600"
-                          : "text-rose-600"
-                      }`}
+                      className={roasClass(campaign.roas)}
                     >
                       {Number(
                         campaign.roas || 0

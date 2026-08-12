@@ -43,7 +43,7 @@ export default function DailyPage() {
   const [selectedAccounts, setSelectedAccounts] = useState([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
 
-  const [presetKey, setPresetKey] = useState("7d");
+  const [presetKey, setPresetKey] = useState("today");
   const [customSince, setCustomSince] = useState(shiftDays(todayIso(), -6));
   const [customUntil, setCustomUntil] = useState(todayIso());
 

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, ChevronLeft, Columns3, GripVertical, Pin, Pi
 import { ALL_COLUMNS, DEFAULT_HIDDEN } from "../../lib/campaignExplorerColumns";
 import ExpandedRowContent from "./ExpandedRowContent";
 import { useColumnPrefs } from "../../lib/useColumnPrefs";
+import { LiveIndicator, RoasValue, StatusPill } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — Campaign Explorer's dense data table. Purpose-built rather
@@ -248,7 +249,9 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
               {visibleColumns.map((c) => (
                 <th
                   key={c.key}
-                  className={`relative select-none cursor-pointer ${pinnedCols.has(c.key) ? "sticky z-[4] bg-slate-50 shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""}`}
+                  className={`relative select-none cursor-pointer ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""} ${
+                    pinnedCols.has(c.key) ? "sticky z-[4] bg-slate-50 shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""
+                  }`}
                   style={{ width: widths[c.key] || c.defaultWidth, left: pinnedCols.has(c.key) ? pinnedLeftOffsets[c.key] : undefined }}
                   onClick={() => handleSort(c.key)}
                   title={c.group}
@@ -281,15 +284,41 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
                           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         </button>
                       </td>
-                      {visibleColumns.map((col) => (
-                        <td
-                          key={col.key}
-                          className={pinnedCols.has(col.key) ? "sticky z-[1] bg-white shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""}
-                          style={{ left: pinnedCols.has(col.key) ? pinnedLeftOffsets[col.key] : undefined }}
-                        >
-                          {col.render ? col.render(c) : c[col.key]}
-                        </td>
-                      ))}
+                      {visibleColumns.map((col) => {
+                        const alignClass = col.align === "right" ? "num" : col.align === "center" ? "center" : "";
+                        const pinClass = pinnedCols.has(col.key) ? "sticky z-[1] bg-white shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : "";
+                        const style = { left: pinnedCols.has(col.key) ? pinnedLeftOffsets[col.key] : undefined };
+
+                        if (col.key === "campaignName") {
+                          return (
+                            <td key={col.key} className={pinClass} style={style}>
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="campaign-name truncate max-w-[190px]">{c.campaignName}</span>
+                                <LiveIndicator campaign={c} />
+                              </div>
+                            </td>
+                          );
+                        }
+                        if (col.key === "roas") {
+                          return (
+                            <td key={col.key} className={`num ${pinClass}`} style={style}>
+                              <RoasValue roas={c.roas} />
+                            </td>
+                          );
+                        }
+                        if (col.key === "status") {
+                          return (
+                            <td key={col.key} className={`center ${pinClass}`} style={style}>
+                              <StatusPill status={c.effectiveStatus || c.status} />
+                            </td>
+                          );
+                        }
+                        return (
+                          <td key={col.key} className={`${alignClass} ${pinClass}`} style={style}>
+                            {col.render ? col.render(c) : c[col.key]}
+                          </td>
+                        );
+                      })}
                     </tr>
                     {expanded && (
                       <tr>

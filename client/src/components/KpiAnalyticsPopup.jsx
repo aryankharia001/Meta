@@ -15,6 +15,7 @@ import { fetchOrdersDetailed } from "../lib/api";
 import { getCachedDetailedOrders, setCachedDetailedOrders } from "../lib/detailedOrdersCache";
 import { downloadCsv } from "../lib/csv";
 import { currency, number, multiplier, formatDate } from "../lib/format";
+import { roasClass } from "../lib/campaignDisplay";
 import CampaignLink from "./CampaignLink";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
@@ -560,22 +561,22 @@ function CampaignFinanceView({ rows, tokenId, since, until, sortKeyDefault, titl
                     <th className="cursor-pointer select-none" onClick={() => handleSort("campaignName")}>
                       Campaign{arrow("campaignName")}
                     </th>
-                    <th className="cursor-pointer select-none" onClick={() => handleSort("spend")}>
+                    <th className="num cursor-pointer select-none" onClick={() => handleSort("spend")}>
                       Spend{arrow("spend")}
                     </th>
-                    <th className="cursor-pointer select-none" onClick={() => handleSort("revenue")}>
+                    <th className="num cursor-pointer select-none" onClick={() => handleSort("revenue")}>
                       Revenue{arrow("revenue")}
                     </th>
-                    <th className="cursor-pointer select-none" onClick={() => handleSort("orderCount")}>
+                    <th className="num cursor-pointer select-none" onClick={() => handleSort("orderCount")}>
                       Orders{arrow("orderCount")}
                     </th>
-                    <th className="cursor-pointer select-none" onClick={() => handleSort("aov")}>
+                    <th className="num cursor-pointer select-none" onClick={() => handleSort("aov")}>
                       Avg Order Value{arrow("aov")}
                     </th>
-                    <th className="cursor-pointer select-none" onClick={() => handleSort("roas")}>
+                    <th className="num cursor-pointer select-none" onClick={() => handleSort("roas")}>
                       ROAS{arrow("roas")}
                     </th>
-                    <th className="cursor-pointer select-none" onClick={() => handleSort("profit")}>
+                    <th className="num cursor-pointer select-none" onClick={() => handleSort("profit")}>
                       Profit{arrow("profit")}
                     </th>
                   </tr>
@@ -591,16 +592,17 @@ function CampaignFinanceView({ rows, tokenId, since, until, sortKeyDefault, titl
                           accountId={r.accountId}
                           since={since}
                           until={until}
+                          className="campaign-name"
                         />
                       </td>
-                      <td>{currency(r.spend)}</td>
-                      <td>{currency(r.revenue)}</td>
-                      <td>{number(r.orderCount)}</td>
-                      <td>{currency(r.aov)}</td>
-                      <td className={`font-bold ${r.roas >= 3 ? "text-emerald-600" : r.roas >= 2 ? "text-amber-600" : "text-rose-600"}`}>
+                      <td className="num metric-primary">{currency(r.spend)}</td>
+                      <td className="num metric-primary">{currency(r.revenue)}</td>
+                      <td className="num">{number(r.orderCount)}</td>
+                      <td className="num">{currency(r.aov)}</td>
+                      <td className={`num ${roasClass(r.roas)}`}>
                         {multiplier(r.roas)}
                       </td>
-                      <td className={r.profit >= 0 ? "text-emerald-600" : "text-rose-600"}>{currency(r.profit)}</td>
+                      <td className={`num ${r.profit >= 0 ? "text-emerald-600" : "text-rose-600"}`}>{currency(r.profit)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -857,17 +859,18 @@ function buildOrderColumns({ tokenId, since, until }) {
         <CampaignLink tokenId={tokenId} campaignId={o.campaignId} campaignName={o.campaignName} since={since} until={until} className="!text-xs" />
       ),
     },
-    { key: "totalAmountPayable", label: "Revenue", defaultWidth: 100, render: (o) => currency(o.totalAmountPayable) },
+    { key: "totalAmountPayable", label: "Revenue", defaultWidth: 100, align: "right", render: (o) => currency(o.totalAmountPayable) },
     {
       key: "paymentType",
       label: "Payment Type",
       defaultWidth: 120,
       sortable: false,
+      align: "center",
       render: (o) => <span className={`badge ${o.paymentType === "PREPAID" ? "badge-blue" : "badge-amber"}`}>{o.paymentType || "N/A"}</span>,
     },
     { key: "product", label: "Products", defaultWidth: 160, sortable: false, render: (o) => o.product || "N/A" },
-    { key: "productQuantity", label: "Quantity", defaultWidth: 90, sortable: false, render: (o) => o.productQuantity ?? "N/A" },
-    { key: "status", label: "Status", defaultWidth: 120, sortable: false, render: (o) => o.deliveryStatus || o.orderStatus || "N/A" },
+    { key: "productQuantity", label: "Quantity", defaultWidth: 90, sortable: false, align: "right", render: (o) => o.productQuantity ?? "N/A" },
+    { key: "status", label: "Status", defaultWidth: 120, sortable: false, align: "center", render: (o) => o.deliveryStatus || o.orderStatus || "N/A" },
     { key: "courier", label: "Courier", defaultWidth: 120, sortable: false, render: (o) => o.courier || "N/A" },
     { key: "orderDate", label: "Date", defaultWidth: 120, render: (o) => formatDate(o.orderDate) },
   ];
@@ -958,7 +961,7 @@ function OrdersTable({ orders, tokenId, since, until, onOrderClick, exportFilena
                   {orderedColumns.map((c) => (
                     <th
                       key={c.key}
-                      className={c.sortable !== false ? "cursor-pointer select-none" : ""}
+                      className={`${c.sortable !== false ? "cursor-pointer select-none" : ""} ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""}`}
                       onClick={() => c.sortable !== false && handleSort(c.key)}
                     >
                       {c.label}
@@ -969,11 +972,21 @@ function OrdersTable({ orders, tokenId, since, until, onOrderClick, exportFilena
               </thead>
               <tbody>
                 {paged.map((o) => (
-                  <tr key={o.orderId} className="cursor-pointer" onClick={() => onOrderClick(o)}>
+                  <tr key={o.orderId} className="row-clickable" onClick={() => onOrderClick(o)}>
                     {orderedColumns.map((c) => (
                       <td
                         key={c.key}
-                        className={c.key === "orderId" ? "font-medium text-slate-700" : c.key === "product" ? "max-w-[180px] truncate" : ""}
+                        className={
+                          c.key === "orderId"
+                            ? "metric-primary"
+                            : c.key === "product"
+                            ? "max-w-[180px] truncate"
+                            : c.align === "right"
+                            ? "num"
+                            : c.align === "center"
+                            ? "center"
+                            : ""
+                        }
                         title={c.key === "product" ? o.product || "N/A" : undefined}
                         onClick={c.key === "campaignName" ? (e) => e.stopPropagation() : undefined}
                       >

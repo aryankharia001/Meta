@@ -82,7 +82,7 @@ export default function AnalyticsPage() {
   const [adAccounts, setAdAccounts] = useState([]);
   const [selectedAccounts, setSelectedAccounts] = useState([]);
 
-  const [presetKey, setPresetKey] = useState("30d");
+  const [presetKey, setPresetKey] = useState("today");
   const [customSince, setCustomSince] = useState(shiftDays(todayIso(), -29));
   const [customUntil, setCustomUntil] = useState(todayIso());
   const { since, until } = useMemo(() => {

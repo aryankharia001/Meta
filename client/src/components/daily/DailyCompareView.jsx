@@ -1,6 +1,8 @@
 import { Inbox } from "lucide-react";
 import { currency, number, multiplier } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
+import { formatBudget, roasClass } from "../../lib/campaignDisplay";
+import { LiveIndicator } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 (campaign selection) — "Campaign Comparison Mode". Only
@@ -19,10 +21,11 @@ import { formatDayLabel } from "../../lib/dateIst";
 // ────────────────────────────────────────────────────────────────
 
 const COMPARE_METRICS = [
+  { key: "budget", label: "Budget", format: (v, c) => formatBudget(c?.budget, c?.budgetType) || "N/A" },
   { key: "spend", label: "Spend", format: currency },
   { key: "orders", label: "Orders", format: number },
   { key: "revenue", label: "Revenue", format: currency },
-  { key: "roas", label: "ROAS", format: multiplier },
+  { key: "roas", label: "ROAS" },
   { key: "codOrders", label: "COD", format: number },
   { key: "prepaidOrders", label: "Prepaid", format: number },
   { key: "delivered", label: "Delivered", format: number },
@@ -63,7 +66,10 @@ export default function DailyCompareView({ days, onOpenRow }) {
                       onClick={() => onOpenRow(c)}
                       title="Open this campaign's 24-hour detail for this date"
                     >
-                      {c.campaignName}
+                      <span className="inline-flex items-center gap-1.5">
+                        {c.campaignName}
+                        <LiveIndicator status={c.effectiveStatus || c.status} />
+                      </span>
                     </th>
                   ))}
                 </tr>
@@ -73,8 +79,12 @@ export default function DailyCompareView({ days, onOpenRow }) {
                   <tr key={m.key}>
                     <td className="font-medium text-slate-600">{m.label}</td>
                     {d.campaigns.map((c) => (
-                      <td key={c.campaignId || "unmatched"} className="cursor-pointer" onClick={() => onOpenRow(c)}>
-                        {m.format(c[m.key])}
+                      <td
+                        key={c.campaignId || "unmatched"}
+                        className={`row-clickable num ${m.key === "roas" ? roasClass(c.roas) : ""}`}
+                        onClick={() => onOpenRow(c)}
+                      >
+                        {m.key === "roas" ? multiplier(c.roas) : m.format(c[m.key], c)}
                       </td>
                     ))}
                   </tr>

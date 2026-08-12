@@ -98,12 +98,12 @@ export default function CampaignExplorerPage() {
     return fromUrl ? fromUrl.split(",").filter(Boolean) : [];
   });
 
-  const [presetKey, setPresetKey] = useState(searchParams.get("preset") || "30d");
-  const [customSince, setCustomSince] = useState(searchParams.get("since") || shiftDays(todayIso(), -29));
+  const [presetKey, setPresetKey] = useState(searchParams.get("preset") || "today");
+  const [customSince, setCustomSince] = useState(searchParams.get("since") || todayIso());
   const [customUntil, setCustomUntil] = useState(searchParams.get("until") || todayIso());
   const { since, until } = useMemo(() => {
     if (presetKey === "custom") return { since: customSince, until: customUntil };
-    return (PRESETS.find((p) => p.key === presetKey) || PRESETS[3]).range();
+    return (PRESETS.find((p) => p.key === presetKey) || PRESETS[0]).range();
   }, [presetKey, customSince, customUntil]);
 
   const [search, setSearch] = useState(searchParams.get("q") || "");

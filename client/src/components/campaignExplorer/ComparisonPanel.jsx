@@ -1,5 +1,6 @@
 import { X, Download, GitCompareArrows } from "lucide-react";
 import { currency, number, percent, multiplier } from "../../lib/format";
+import { formatBudget, roasClass } from "../../lib/campaignDisplay";
 
 // Phase 8 — Campaign Comparison. A focused, read-only side-by-side view
 // of whatever campaigns are currently selected in ExplorerTable —
@@ -7,6 +8,7 @@ import { currency, number, percent, multiplier } from "../../lib/format";
 // fetches. Metrics list matches the spec exactly.
 
 const METRICS = [
+  { key: "budget", label: "Budget", format: (v, c) => formatBudget(c?.budget, c?.budgetType) || "N/A" },
   { key: "spend", label: "Spend", format: currency },
   { key: "revenue", label: "Revenue", format: currency },
   { key: "profit", label: "Profit", format: currency },
@@ -41,16 +43,18 @@ function downloadCsv(filename, rows) {
 
 export default function ComparisonPanel({ campaigns, onClose }) {
   const exportComparison = () => {
-    const rows = [["Metric", ...campaigns.map((c) => c.campaignName)], ...METRICS.map((m) => [m.label, ...campaigns.map((c) => m.format(c[m.key]))])];
+    const rows = [["Metric", ...campaigns.map((c) => c.campaignName)], ...METRICS.map((m) => [m.label, ...campaigns.map((c) => m.format(c[m.key], c))])];
     downloadCsv("campaign-comparison.csv", rows);
   };
 
   // Best value per metric row gets a subtle highlight — "higher is
   // better" for everything except Cost Per Order/CPC/CPM, where lower
-  // spend-efficiency numbers are the win.
+  // spend-efficiency numbers are the win. Budget isn't a performance
+  // metric (a bigger budget isn't "better"), so it's excluded entirely.
   const LOWER_IS_BETTER = new Set(["costPerOrder", "cpc", "cpm"]);
+  const NO_BEST = new Set(["budget"]);
   const bestFor = (key) => {
-    if (campaigns.length < 2) return null;
+    if (NO_BEST.has(key) || campaigns.length < 2) return null;
     const values = campaigns.map((c) => Number(c[key] || 0));
     return LOWER_IS_BETTER.has(key) ? Math.min(...values.filter((v) => v > 0)) ?? Math.min(...values) : Math.max(...values);
   };
@@ -92,11 +96,16 @@ export default function ComparisonPanel({ campaigns, onClose }) {
                 return (
                   <tr key={m.key}>
                     <td className="sticky left-0 bg-white font-medium text-slate-600">{m.label}</td>
-                    {campaigns.map((c) => (
-                      <td key={c.campaignId} className={best !== null && Number(c[m.key] || 0) === best ? "font-semibold text-emerald-600" : ""}>
-                        {m.format(c[m.key])}
-                      </td>
-                    ))}
+                    {campaigns.map((c) => {
+                      const isBest = best !== null && Number(c[m.key] || 0) === best;
+                      const cellClass =
+                        m.key === "roas" ? roasClass(c.roas) : isBest ? "font-semibold text-emerald-600" : "";
+                      return (
+                        <td key={c.campaignId} className={cellClass}>
+                          {m.format(c[m.key], c)}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })}
