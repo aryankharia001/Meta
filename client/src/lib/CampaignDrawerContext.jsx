@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState } from "react";
+import { logActivity } from "./api";
 
 // Mounted once, above <Routes> in App.jsx (same pattern as
 // ShiprocketSyncContext) so any page — Dashboard, Campaign Comparison,
@@ -19,6 +20,8 @@ export function CampaignDrawerProvider({ children }) {
   const openCampaign = useCallback((meta) => {
     if (!meta?.campaignId || !meta?.campaignName) return;
     setActiveCampaign(meta);
+    // Phase 14 §6 — "Campaign opened". Fire-and-forget.
+    logActivity("campaign_opened", `Campaign opened (${meta.campaignName})`, {}, "campaign", meta.campaignId);
   }, []);
 
   const closeCampaign = useCallback(() => setActiveCampaign(null), []);

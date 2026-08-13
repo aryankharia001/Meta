@@ -60,7 +60,7 @@ const DAY_ROLLUP_COLUMNS = [
   { key: "prepaidOrders", label: "Prepaid", width: 100, align: "right" },
 ];
 
-export default function DailyTable({ days, onOpenRow }) {
+export default function DailyTable({ days, onOpenRow, onOpenDate }) {
   const [search, setSearch] = useState("");
   const [mode, setMode] = useState("grouped"); // "grouped" | "flat"
   const [expanded, setExpanded] = useState(new Set());
@@ -191,6 +191,7 @@ export default function DailyTable({ days, onOpenRow }) {
             expanded={expanded}
             onToggleExpand={toggleExpand}
             onOpenRow={onOpenRow}
+            onOpenDate={onOpenDate}
             daySortConfig={daySortConfig}
             onDaySort={handleDaySort}
             dayArrow={dayArrow}
@@ -225,10 +226,10 @@ function DailyRowCell({ col, row }) {
     return (
       <td>
         <div className="flex items-center gap-2 min-w-0">
+          {!row.isUnmatched && <LiveIndicator status={row.effectiveStatus || row.status} />}
           <span className={`truncate max-w-[200px] ${row.isUnmatched ? "font-medium text-slate-500" : "campaign-name"}`}>
             {row.campaignName || "N/A"}
           </span>
-          {!row.isUnmatched && <LiveIndicator status={row.effectiveStatus || row.status} />}
         </div>
       </td>
     );
@@ -246,7 +247,7 @@ function DailyRowCell({ col, row }) {
   return <td className={alignClass}>{col.render ? col.render(row) : row[col.key]}</td>;
 }
 
-function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySortConfig, onDaySort, dayArrow, sortConfig, onSort, arrow }) {
+function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, onOpenDate, daySortConfig, onDaySort, dayArrow, sortConfig, onSort, arrow }) {
   return (
     <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
       <thead className="sticky top-0 z-[2]">
@@ -272,8 +273,27 @@ function GroupedView({ days, columns, expanded, onToggleExpand, onOpenRow, daySo
           const sortedCampaigns = [...d.campaigns].sort((a, b) => compareRows(a, b, sortConfig.key, sortConfig.direction));
           return (
             <Fragment key={d.date}>
-              <tr className={`row-clickable bg-slate-50/60 hover:bg-slate-100/70 ${isOpen ? "row-selected" : ""}`} onClick={() => onToggleExpand(d.date)}>
-                <td className="text-slate-400">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
+              {/* Phase 15 §1 — clicking the date row itself opens the new
+                  Hourly Performance drawer for that whole date (every
+                  campaign, not just one); the chevron keeps its
+                  original job of expanding this row's campaign
+                  sub-table in place, via its own stopPropagation click
+                  so both behaviors coexist without conflicting. */}
+              <tr
+                className={`row-clickable bg-slate-50/60 hover:bg-slate-100/70 ${isOpen ? "row-selected" : ""}`}
+                onClick={() => onOpenDate?.(d.date)}
+                title="View hourly breakdown for this date"
+              >
+                <td
+                  className="text-slate-400"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleExpand(d.date);
+                  }}
+                  title="Expand campaigns"
+                >
+                  {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </td>
                 <td className="metric-primary">{formatDayLabel(d.date)}</td>
                 <td className="num">{number(d.totals.campaignCount)}</td>
                 <td className="num metric-primary">{currency(d.totals.spend)}</td>

@@ -29,22 +29,37 @@ import {
   CheckCircle2,
   Info,
   FileText,
+  Layers,
 } from "lucide-react";
-import { fetchCampaignDetails } from "../lib/api";
+import { fetchCampaignDetails, logActivity } from "../lib/api";
 import { getCachedCampaignDetails, setCachedCampaignDetails } from "../lib/campaignDetailsCache";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
+import { useOverlayEscape } from "../lib/overlayStack";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
 import { currency, number, percent, multiplier, formatDate, formatDateTime } from "../lib/format";
 import { statusBadgeClass, roasClass, formatBudget } from "../lib/campaignDisplay";
 import { LiveIndicator } from "./CampaignCells";
 import InfoModal from "./InfoModal";
+import OrdersListPopup from "./OrdersListPopup";
 import FavoriteButton from "./FavoriteButton";
 import EntityNotesPanel from "./EntityNotesPanel";
 import { recordRecentlyViewed } from "../lib/recentlyViewed";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
 import ColumnSettingsMenu from "./ColumnSettingsMenu";
-import { CAMPAIGN_ORDER_COLUMNS, CAMPAIGN_ORDER_DEFAULT_HIDDEN } from "../lib/campaignOrderColumns";
+import {
+  CAMPAIGN_ORDER_COLUMNS,
+  CAMPAIGN_ORDER_DEFAULT_HIDDEN,
+  CAMPAIGN_STAT_ORDER_COLUMNS,
+  CAMPAIGN_STAT_ORDER_DEFAULT_HIDDEN,
+} from "../lib/campaignOrderColumns";
+// Phase 13 §3/§10 — Ad Sets section + Hourly Performance section, both
+// purely additive (new sections appended to this drawer, nothing above
+// them touched). fetchAdSetsByCampaign is a read-only GET against the
+// new /api/adset-explorer routes.
+import { fetchAdSetsByCampaign } from "../lib/api";
+import { useAdSetDrawer } from "../lib/AdSetDrawerContext";
+import HourlyPanel from "./hourly/HourlyPanel";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 2 — Campaign drawer: the "click a campaign, get a full CRM
@@ -131,11 +146,88 @@ function downloadCsv(filename, rows) {
 const PAGE_SIZE = 10;
 const EMPTY_FILTERS = { paymentType: "", orderStatus: "", deliveryStatus: "", product: "", state: "", city: "" };
 
+// KPI tiles that have a real order collection behind them (clicking one
+// opens the actual order list via OrdersListPopup) vs. purely scalar
+// stats (spend/roas/aov/cpo — nothing to list, just a value).
+const COLLECTION_STAT_KEYS = new Set([
+  "totalOrders",
+  "matchedOrders",
+  "revenue",
+  "prepaid",
+  "cod",
+  "delivered",
+  "pending",
+  "cancelled",
+  "returned",
+]);
+
+const STAT_EMPTY_MESSAGES = {
+  totalOrders: "No orders found for this campaign and selected date range.",
+  matchedOrders: "No matched orders found for this campaign and selected date range.",
+  revenue: "No orders found for this campaign and selected date range.",
+  prepaid: "No prepaid orders found for this campaign and selected date range.",
+  cod: "No COD orders found for this campaign and selected date range.",
+  delivered: "No delivered orders found for this campaign and selected date range.",
+  pending: "No pending orders found for this campaign and selected date range.",
+  cancelled: "No cancelled orders found for this campaign and selected date range.",
+  returned: "No returned orders found for this campaign and selected date range.",
+};
+
+// Plain explanations for the scalar (non-collection) KPI tiles — shown
+// in InfoModal instead of the old "coming in a later phase" placeholder.
+const SCALAR_STAT_DESCRIPTIONS = {
+  spend: "Total amount spent on this campaign, from Meta insights, for the selected date range.",
+  roas: "Return on ad spend — revenue divided by spend — for the selected date range.",
+  aov: "Average order value — total revenue divided by number of orders — for the selected date range.",
+  cpo: "Cost per order — spend divided by number of orders — for the selected date range.",
+};
+
+// Returns the exact order list behind a given collection-stat KPI key.
+// Deliberately byte-identical filter logic to kpiValues' own
+// prepaid/cod/delivered/pending/cancelled/returned counts above, so the
+// popup's order count always matches the KPI tile's displayed number.
+function getStatOrders(key, orders) {
+  if (key === "prepaid") return orders.filter((o) => o.paymentType === "PREPAID");
+  if (key === "cod") return orders.filter((o) => o.paymentType === "CASH_ON_DELIVERY");
+  if (key === "delivered" || key === "pending" || key === "cancelled" || key === "returned") {
+    const withDelivery = orders.filter((o) => o.deliveryStatus);
+    const kws =
+      key === "delivered"
+        ? ["deliver"]
+        : key === "pending"
+        ? ["pending", "transit", "process", "confirm"]
+        : key === "cancelled"
+        ? ["cancel"]
+        : ["return", "rto"];
+    return withDelivery.filter((o) => kws.some((k) => o.deliveryStatus.toLowerCase().includes(k)));
+  }
+  // totalOrders / matchedOrders / revenue — all orders in range.
+  return orders;
+}
+
 export default function CampaignDrawer() {
   const { activeCampaign, closeCampaign } = useCampaignDrawer();
   const { openOrder } = useOrderDrawer();
+  const { openAdSet } = useAdSetDrawer();
   const liveSync = useLiveSync();
   const open = !!activeCampaign;
+
+  // Phase 13 §3/§10 — Ad Sets under this campaign. Separate state/effect
+  // from the campaign `details` fetch above (own loading flag, own
+  // failure mode) so a slow/failed Meta ad-set fetch can never block or
+  // break the rest of this drawer.
+  const [campaignAdSets, setCampaignAdSets] = useState([]);
+  const [adSetsLoading, setAdSetsLoading] = useState(false);
+  useEffect(() => {
+    if (!activeCampaign?.tokenId || !activeCampaign?.campaignId) return;
+    let cancelled = false;
+    setAdSetsLoading(true);
+    fetchAdSetsByCampaign(activeCampaign.tokenId, activeCampaign.campaignId, { since: activeCampaign.since, until: activeCampaign.until })
+      .then((res) => !cancelled && setCampaignAdSets(res.adsets || []))
+      .catch(() => !cancelled && setCampaignAdSets([]))
+      .finally(() => !cancelled && setAdSetsLoading(false));
+    return () => { cancelled = true; };
+  }, [activeCampaign?.tokenId, activeCampaign?.campaignId, activeCampaign?.since, activeCampaign?.until]);
 
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -149,6 +241,9 @@ export default function CampaignDrawer() {
   const [page, setPage] = useState(1);
 
   const [infoCard, setInfoCard] = useState(null);
+  // { key, label } of whichever collection-stat KPI tile was clicked, or
+  // null. Drives the OrdersListPopup drill-down below.
+  const [statPopup, setStatPopup] = useState(null);
 
   const loadDetails = (meta, { force = false, isNewCampaign = false } = {}) => {
     const { tokenId, campaignId, campaignName, accountId, since, until } = meta;
@@ -190,6 +285,8 @@ export default function CampaignDrawer() {
     setFiltersOpen(false);
     setSortConfig({ key: "orderCreatedAt", direction: "desc" });
     setPage(1);
+    setInfoCard(null);
+    setStatPopup(null);
     loadDetails(activeCampaign, { isNewCampaign: true });
     if (activeCampaign.campaignId) {
       recordRecentlyViewed("campaign", activeCampaign.campaignId, activeCampaign.campaignName, {
@@ -230,12 +327,7 @@ export default function CampaignDrawer() {
     setPage(1);
   }, [filters, search, sortConfig]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => e.key === "Escape" && closeCampaign();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, closeCampaign]);
+  useOverlayEscape(open, closeCampaign);
 
   useEffect(() => {
     if (!open) return;
@@ -285,6 +377,47 @@ export default function CampaignDrawer() {
       cpo,
     };
   }, [details]);
+
+  // Order list behind the currently open stat popup, using the exact
+  // same predicates as kpiValues above so the popup's order count always
+  // matches the KPI tile's displayed number.
+  const statOrders = useMemo(() => {
+    if (!statPopup || !details) return [];
+    return getStatOrders(statPopup.key, details.orders || []);
+  }, [statPopup, details]);
+
+  // Extra summary cards for the stat popup: Avg Order Value for every
+  // collection stat, plus an honest "Expected COD Revenue" card for the
+  // cod popup specifically — only shown when delivery-status data
+  // actually exists for at least one COD order (same "don't fabricate
+  // untracked data" convention insights.deliveredPercent/cancelledPercent
+  // already follow above). No COD "conversion rate" card — there's no
+  // underlying click/event data in this app to compute a genuine rate
+  // from, so it's omitted rather than invented.
+  const statExtraCards = useMemo(() => {
+    if (!statPopup) return [];
+    const revenue = statOrders.reduce((s, o) => s + Number(o.totalAmountPayable || 0), 0);
+    const aov = statOrders.length ? revenue / statOrders.length : 0;
+    const cards = [{ label: "Avg Order Value", value: currency(aov) }];
+
+    if (statPopup.key === "cod") {
+      const allOrders = details?.orders || [];
+      const codOrders = allOrders.filter((o) => o.paymentType === "CASH_ON_DELIVERY");
+      const codHasDeliveryData = codOrders.some((o) => o.deliveryStatus);
+      if (codHasDeliveryData) {
+        const isCancelledOrReturned = (o) => {
+          if (!o.deliveryStatus) return false;
+          const s = o.deliveryStatus.toLowerCase();
+          return s.includes("cancel") || s.includes("return") || s.includes("rto");
+        };
+        const expectedCodRevenue = codOrders
+          .filter((o) => !isCancelledOrReturned(o))
+          .reduce((s, o) => s + Number(o.totalAmountPayable || 0), 0);
+        cards.push({ label: "Expected COD Revenue", value: currency(expectedCodRevenue) });
+      }
+    }
+    return cards;
+  }, [statPopup, statOrders, details]);
 
   const insights = useMemo(() => {
     if (!details) return null;
@@ -443,6 +576,8 @@ export default function CampaignDrawer() {
       ...KPI_DEFS.map((d) => [d.label, d.format(kpiValues[d.key])]),
     ];
     downloadCsv(`campaign-${c.id}-summary.csv`, rows);
+    // Phase 14 §6 — "Campaign exported". Fire-and-forget.
+    logActivity("campaign_exported", `Campaign exported (${c.name})`, {}, "campaign", c.id);
   };
 
   const exportOrders = () => {
@@ -462,6 +597,14 @@ export default function CampaignDrawer() {
       ]),
     ];
     downloadCsv(`campaign-${details.campaign.id}-orders.csv`, rows);
+    // Phase 14 §6 — "Order export performed". Fire-and-forget.
+    logActivity(
+      "order_export",
+      `Order export performed (${sortedOrders.length} order${sortedOrders.length === 1 ? "" : "s"} — ${details.campaign.name})`,
+      {},
+      "campaign",
+      details.campaign.id
+    );
   };
 
   const clearFilters = () => setFilters(EMPTY_FILTERS);
@@ -488,7 +631,7 @@ export default function CampaignDrawer() {
           <DrawerError message={error} onRetry={() => activeCampaign && loadDetails(activeCampaign, { force: true })} onClose={closeCampaign} />
         )}
 
-        {!error && details && (
+        {open && !error && details && (
           <>
             {/* ── Sticky campaign header ─────────────────────── */}
             <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-6 py-4">
@@ -502,6 +645,7 @@ export default function CampaignDrawer() {
                       meta={{ tokenId: activeCampaign?.tokenId, accountId: details.campaign.accountId }}
                       size={16}
                     />
+                    <LiveIndicator status={details.campaign.effectiveStatus || details.campaign.status} />
                     <h2 className="font-display font-bold text-lg text-slate-800 truncate max-w-[420px]">
                       {details.campaign.name}
                     </h2>
@@ -510,7 +654,6 @@ export default function CampaignDrawer() {
                         {details.campaign.status}
                       </span>
                     )}
-                    <LiveIndicator status={details.campaign.effectiveStatus || details.campaign.status} />
                     {!details.campaign.metaAvailable && (
                       <span className="badge badge-slate" title="Meta didn't return metadata for this campaign ID">
                         Meta data unavailable
@@ -588,9 +731,13 @@ export default function CampaignDrawer() {
                     <button
                       key={def.key}
                       type="button"
-                      onClick={() =>
-                        setInfoCard({ ...def, display: kpiValues ? def.format(kpiValues[def.key]) : "N/A" })
-                      }
+                      onClick={() => {
+                        if (COLLECTION_STAT_KEYS.has(def.key)) {
+                          setStatPopup({ key: def.key, label: def.label });
+                        } else {
+                          setInfoCard({ ...def, display: kpiValues ? def.format(kpiValues[def.key]) : "N/A" });
+                        }
+                      }}
                       className="text-left card !p-3.5 flex flex-col gap-2.5 hover:-translate-y-0.5 hover:border-slate-300"
                     >
                       <span className={`flex items-center justify-center w-8 h-8 rounded-lg ${ACCENTS[def.accent]}`}>
@@ -790,6 +937,66 @@ export default function CampaignDrawer() {
                 </div>
               </section>
 
+              {/* Phase 13 §3/§10 — Ad Sets under this campaign */}
+              <section>
+                <SectionTitle icon={Layers}>Ad Sets ({campaignAdSets.length})</SectionTitle>
+                <div className="card">
+                  {adSetsLoading ? (
+                    <p className="text-sm text-slate-400 py-3">Loading ad sets…</p>
+                  ) : campaignAdSets.length === 0 ? (
+                    <p className="text-sm text-slate-400 py-3">No ad sets found for this campaign in Meta.</p>
+                  ) : (
+                    <div className="overflow-x-auto -mx-4">
+                      <table className="table">
+                        <thead>
+                          <tr><th>Ad Set</th><th>Status</th><th className="text-right">Spend</th><th className="text-right">ROAS</th><th className="text-right">Orders</th><th className="text-right">Revenue</th></tr>
+                        </thead>
+                        <tbody>
+                          {campaignAdSets.map((a) => (
+                            <tr
+                              key={a.adsetId}
+                              className="cursor-pointer"
+                              onClick={() =>
+                                openAdSet({
+                                  tokenId: activeCampaign.tokenId,
+                                  adsetId: a.adsetId,
+                                  adsetName: a.adsetName,
+                                  campaignId: details.campaign.id,
+                                  campaignName: details.campaign.name,
+                                  since: activeCampaign.since,
+                                  until: activeCampaign.until,
+                                })
+                              }
+                            >
+                              <td className="font-medium text-slate-700">{a.adsetName}</td>
+                              <td>{a.effectiveStatus || a.status || "N/A"}</td>
+                              <td className="text-right">{currency(a.spend)}</td>
+                              <td className={`text-right ${roasClass(a.roas)}`}>{multiplier(a.roas)}</td>
+                              <td className="text-right">{a.totalOrders}</td>
+                              <td className="text-right">{currency(a.revenue)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* Phase 13 §1/§2/§11 — Hourly Performance for this campaign */}
+              <section>
+                <SectionTitle icon={Clock}>Hourly Performance</SectionTitle>
+                <div className="card">
+                  <HourlyPanel
+                    tokenId={activeCampaign.tokenId}
+                    campaignId={details.campaign.id}
+                    campaignName={details.campaign.name}
+                    tableIdSuffix={`campaign-${details.campaign.id}`}
+                    title=""
+                  />
+                </div>
+              </section>
+
               {/* Phase 7 — Internal Notes */}
               <section>
                 <SectionTitle icon={FileText}>Internal Notes</SectionTitle>
@@ -808,8 +1015,25 @@ export default function CampaignDrawer() {
         subtitle={infoCard ? `Current value: ${infoCard.display}` : ""}
         icon={infoCard?.icon}
         accentClass={infoCard ? ACCENTS[infoCard.accent] : ""}
-        body={`A detailed ${(infoCard?.label || "").toLowerCase()} drill-down — trend over time, breakdown by day — is coming in a later phase.`}
+        body={infoCard ? SCALAR_STAT_DESCRIPTIONS[infoCard.key] : ""}
         onClose={() => setInfoCard(null)}
+      />
+
+      <OrdersListPopup
+        open={!!statPopup}
+        title={statPopup && details ? `${statPopup.label} — ${details.campaign.name}` : ""}
+        subtitle={details ? `${details.since} to ${details.until}` : ""}
+        orders={statOrders}
+        tokenId={activeCampaign?.tokenId}
+        since={details?.since}
+        until={details?.until}
+        onClose={() => setStatPopup(null)}
+        exportFilename={details && statPopup ? `campaign-${details.campaign.id}-${statPopup.key}.csv` : "campaign-orders.csv"}
+        emptyMessage={statPopup ? STAT_EMPTY_MESSAGES[statPopup.key] : undefined}
+        extraCards={statExtraCards}
+        columns={CAMPAIGN_STAT_ORDER_COLUMNS}
+        defaultHidden={CAMPAIGN_STAT_ORDER_DEFAULT_HIDDEN}
+        storageKey="campaignStatOrdersPopup"
       />
     </>
   );

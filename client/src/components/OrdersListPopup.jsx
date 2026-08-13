@@ -4,8 +4,11 @@ import { currency, formatDate } from "../lib/format";
 import { downloadCsv } from "../lib/csv";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import CampaignLink from "./CampaignLink";
+import AdSetLink from "./AdSetLink";
+import AdLink from "./AdLink";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
 import ColumnSettingsMenu from "./ColumnSettingsMenu";
+import { useOverlayEscape } from "../lib/overlayStack";
 
 // Phase 10 — column definitions for this popup's order table, wired
 // through the shared useColumnPrefs/ColumnSettingsMenu system. "campaignName"
@@ -42,15 +45,33 @@ const ORDERS_LIST_DEFAULT_HIDDEN = ["product"];
 
 const PAGE_SIZE = 10;
 
-export default function OrdersListPopup({ open, title, subtitle, orders, tokenId, since, until, onClose, exportFilename }) {
+export default function OrdersListPopup({
+  open,
+  title,
+  subtitle,
+  orders,
+  tokenId,
+  since,
+  until,
+  onClose,
+  exportFilename,
+  // Optional, backward-compatible additions — every existing caller
+  // (Dashboard's own KPI popups) omits all of these and renders exactly
+  // as before.
+  emptyMessage, // shown instead of the generic "No orders here." when the full list (not just the filtered/searched view) is empty
+  extraCards = [], // [{ label, value }] additional summary cards alongside Orders/Revenue
+  columns, // override ORDERS_LIST_COLUMNS
+  defaultHidden, // override ORDERS_LIST_DEFAULT_HIDDEN
+  storageKey, // override the "ordersListPopup" useColumnPrefs storage key, so a richer caller's column prefs don't collide with the Dashboard's simpler popup
+}) {
   const { openOrder } = useOrderDrawer();
   const [search, setSearch] = useState("");
   const [sortConfig, setSortConfig] = useState({ key: "orderCreatedAt", direction: "desc" });
   const [page, setPage] = useState(1);
   const { orderedColumns, allColumnsOrdered, hidden, toggleHidden, reorder, reset } = useColumnPrefs(
-    "ordersListPopup",
-    ORDERS_LIST_COLUMNS,
-    ORDERS_LIST_DEFAULT_HIDDEN
+    storageKey || "ordersListPopup",
+    columns || ORDERS_LIST_COLUMNS,
+    defaultHidden || ORDERS_LIST_DEFAULT_HIDDEN
   );
 
   useEffect(() => {
@@ -60,12 +81,7 @@ export default function OrdersListPopup({ open, title, subtitle, orders, tokenId
     setPage(1);
   }, [open, title]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useOverlayEscape(open, onClose);
 
   const list = orders || [];
 
@@ -169,6 +185,12 @@ export default function OrdersListPopup({ open, title, subtitle, orders, tokenId
                 <div className="text-[11px] text-slate-400 mb-0.5">Revenue</div>
                 <div className="text-lg font-bold text-slate-800">{currency(totalRevenue)}</div>
               </div>
+              {extraCards.map((c) => (
+                <div key={c.label} className="card !p-3 flex-1 min-w-[140px]">
+                  <div className="text-[11px] text-slate-400 mb-0.5">{c.label}</div>
+                  <div className="text-lg font-bold text-slate-800">{c.value}</div>
+                </div>
+              ))}
             </div>
 
             <div className="card p-0 overflow-hidden">
@@ -193,7 +215,9 @@ export default function OrdersListPopup({ open, title, subtitle, orders, tokenId
                   <span className="flex items-center justify-center w-10 h-10 rounded-2xl bg-slate-100 text-slate-400 mb-2.5">
                     <Inbox size={18} />
                   </span>
-                  <div className="text-sm text-slate-400">{list.length === 0 ? "No orders here." : "No orders match your search."}</div>
+                  <div className="text-sm text-slate-400">
+                    {list.length === 0 ? emptyMessage || "No orders here." : "No orders match your search."}
+                  </div>
                 </div>
               ) : (
                 <>
@@ -226,6 +250,40 @@ export default function OrdersListPopup({ open, title, subtitle, orders, tokenId
                                   <td key={c.key} onClick={(e) => e.stopPropagation()}>
                                     <CampaignLink
                                       tokenId={tokenId}
+                                      campaignId={o.campaignId}
+                                      campaignName={o.campaignName}
+                                      since={since}
+                                      until={until}
+                                      className="!text-xs"
+                                    />
+                                  </td>
+                                );
+                              }
+                              if (c.key === "adsetName") {
+                                return (
+                                  <td key={c.key} onClick={(e) => e.stopPropagation()}>
+                                    <AdSetLink
+                                      tokenId={tokenId}
+                                      adsetId={o.adsetId}
+                                      adsetName={o.adsetName}
+                                      campaignId={o.campaignId}
+                                      campaignName={o.campaignName}
+                                      since={since}
+                                      until={until}
+                                      className="!text-xs"
+                                    />
+                                  </td>
+                                );
+                              }
+                              if (c.key === "adName") {
+                                return (
+                                  <td key={c.key} onClick={(e) => e.stopPropagation()}>
+                                    <AdLink
+                                      tokenId={tokenId}
+                                      adId={o.adId}
+                                      adName={o.adName}
+                                      adsetId={o.adsetId}
+                                      adsetName={o.adsetName}
                                       campaignId={o.campaignId}
                                       campaignName={o.campaignName}
                                       since={since}

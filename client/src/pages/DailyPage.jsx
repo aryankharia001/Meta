@@ -5,6 +5,7 @@ import { useSelectedToken } from "../lib/useSelectedToken";
 import { todayIso, shiftDays } from "../lib/dateIst";
 import DailyTable from "../components/daily/DailyTable";
 import DailyDrawer from "../components/daily/DailyDrawer";
+import DailyHourlyDrawer from "../components/daily/DailyHourlyDrawer";
 import CampaignPicker from "../components/daily/CampaignPicker";
 import DailyCompareView from "../components/daily/DailyCompareView";
 
@@ -58,6 +59,13 @@ export default function DailyPage() {
   const [lastFetchedAt, setLastFetchedAt] = useState(null);
 
   const [drawerMeta, setDrawerMeta] = useState(null);
+  // Phase 15 §1/§13 — separate from drawerMeta above (which is scoped to
+  // one campaign+date, opened from a campaign row inside an expanded
+  // day). This one is scoped to the whole date across every campaign in
+  // the currently selected accounts, opened by clicking the date row
+  // itself. Reuses whatever accounts/token are already selected on this
+  // page, so it automatically respects the existing Daily filters.
+  const [hourlyDrawerMeta, setHourlyDrawerMeta] = useState(null);
 
   // ── Campaign selection & comparison mode ──────────────────────
   // Empty selection = "All Campaigns" (the default, unfiltered view).
@@ -189,6 +197,10 @@ export default function DailyPage() {
     });
   };
 
+  const openDate = (date) => {
+    setHourlyDrawerMeta({ tokenId: TOKEN_ID, date, accountIds: selectedAccounts });
+  };
+
   return (
     <div className="min-h-screen pb-16">
       <div className="sticky top-0 z-20 bg-white/85 backdrop-blur-md border-b border-slate-200">
@@ -318,7 +330,7 @@ export default function DailyPage() {
             {viewMode === "compare" ? (
               <DailyCompareView days={filteredDays} onOpenRow={openRow} />
             ) : (
-              <DailyTable days={filteredDays} onOpenRow={openRow} />
+              <DailyTable days={filteredDays} onOpenRow={openRow} onOpenDate={openDate} />
             )}
           </>
         )}
@@ -331,6 +343,7 @@ export default function DailyPage() {
       </div>
 
       <DailyDrawer meta={drawerMeta} onClose={() => setDrawerMeta(null)} />
+      <DailyHourlyDrawer meta={hourlyDrawerMeta} onClose={() => setHourlyDrawerMeta(null)} />
     </div>
   );
 }

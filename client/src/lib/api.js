@@ -5,15 +5,84 @@ const API_BASE = import.meta.env.VITE_API_URL;
 export const api = axios.create({
   baseURL: API_BASE,
   headers: { "Content-Type": "application/json" },
+  // Phase 14 §3 — required so the browser sends/receives the httpOnly
+  // session cookie set by POST /api/auth/login. Every existing call in
+  // this file already goes through this one axios instance, so this is
+  // the single place this needs to change for auth to work anywhere.
+  withCredentials: true,
 });
 
 api.interceptors.response.use(
   (res) => res,
   (err) => {
     const msg = err.response?.data?.message || err.message || "Something went wrong";
-    return Promise.reject(new Error(msg));
+    const wrapped = new Error(msg);
+    wrapped.status = err.response?.status;
+    // Phase 14 §1/§3 — a 401 from any protected route (session expired,
+    // cookie cleared, account disabled mid-session) means we're no
+    // longer authenticated. Broadcast it instead of importing
+    // AuthContext here (would be a circular import); AuthContext listens
+    // and flips back to the Login page. /auth/* is excluded so a wrong-
+    // password attempt on the login form itself doesn't trigger this.
+    if (err.response?.status === 401 && !String(err.config?.url || "").includes("/auth/")) {
+      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+    }
+    return Promise.reject(wrapped);
   }
 );
+
+// ─── Auth ──────────────────────────────────────────────────
+// Phase 14 §1/§3. Kept together, self-contained, at the top of this
+// file (same convention as the rest of the app's grouped API helpers
+// below) — no other module needs to know these exist except
+// AuthContext.jsx.
+
+export async function loginRequest(email, password) {
+  const { data } = await api.post("/auth/login", { email, password });
+  return data; // { success, user: { id, email, role } }
+}
+
+export async function logoutRequest() {
+  const { data } = await api.post("/auth/logout");
+  return data;
+}
+
+export async function fetchCurrentUser() {
+  const { data } = await api.get("/auth/me");
+  return data; // { success, user }
+}
+
+export async function changePasswordRequest(currentPassword, newPassword) {
+  const { data } = await api.post("/auth/change-password", { currentPassword, newPassword });
+  return data;
+}
+
+// ─── User management (admin only) ────────────────────────────
+
+export async function fetchUsers() {
+  const { data } = await api.get("/users");
+  return data; // { success, users }
+}
+
+export async function createUser(payload) {
+  const { data } = await api.post("/users", payload);
+  return data;
+}
+
+export async function updateUser(id, payload) {
+  const { data } = await api.patch(`/users/${id}`, payload);
+  return data;
+}
+
+export async function resetUserPassword(id, newPassword) {
+  const { data } = await api.patch(`/users/${id}/password`, { newPassword });
+  return data;
+}
+
+export async function deleteUser(id) {
+  const { data } = await api.delete(`/users/${id}`);
+  return data;
+}
 
 
 // Add these alongside your existing fetchCampaigns / fetchTokens functions
@@ -318,14 +387,19 @@ export async function deleteEntityNote(noteId) {
 
 // ─── Activity Log (Phase 7) ───────────────────────────────────
 
-export async function fetchActivityLog(limit) {
-  const { data } = await api.get("/activity-log", { params: limit ? { limit } : undefined });
+export async function fetchActivityLog(params = {}) {
+  const cleaned = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v !== undefined && v !== null));
+  const { data } = await api.get("/activity-log", { params: cleaned });
   return data; // { success, entries }
 }
-export async function logActivity(type, message, meta) {
+// Phase 14 §7 — entityType/entityId are optional (e.g. "order"/orderId,
+// "campaign"/campaignId) so log entries can record which specific thing
+// an action touched; `user` is always attributed server-side from the
+// logged-in session, never trusted from this call.
+export async function logActivity(type, message, meta, entityType, entityId) {
   // Fire-and-forget from the caller's perspective — activity logging
   // should never block or fail the action it's describing.
-  return api.post("/activity-log", { type, message, meta }).catch(() => {});
+  return api.post("/activity-log", { type, message, meta, entityType, entityId }).catch(() => {});
 }
 
 // ─── Global Search / Command Palette (Phase 7) ────────────────
@@ -388,4 +462,262 @@ export async function fetchDailyDetail(tokenId, { date, campaignId, campaignName
   if (accountId) params.accountId = accountId;
   const { data } = await api.get(`/daily/${tokenId}/detail`, { params });
   return data; // { success, date, campaign, metrics, orders, dayStartIst, dayEndIst }
+}
+
+// ─── Ad Set Explorer (Phase 13 §4/§10) ───────────────────────────
+// New, additive routes at /api/adset-explorer — never touches
+// /campaign-explorer, /daily, or /campaigns' own endpoints.
+
+export async function fetchAdSets(tokenId, { accountIds, since, until, campaignId }) {
+  const params = new URLSearchParams();
+  params.append("since", since);
+  params.append("until", until ?? since);
+  if (campaignId) params.append("campaignId", campaignId);
+  (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(Boolean).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/adset-explorer/${tokenId}?${params}`);
+  return data; // { success, since, until, adsets, summary }
+}
+
+// Ad sets nested under one campaign, fetched directly off the campaign
+// object — no adAccountId needed. Used by CampaignDrawer's Ad Sets
+// section and any Campaign → Ad Set expandable-row hierarchy.
+export async function fetchAdSetsByCampaign(tokenId, campaignId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/adset-explorer/${tokenId}/by-campaign/${campaignId}`, { params });
+  return data; // { success, campaignId, adsets }
+}
+
+export async function fetchAdSetDetails(tokenId, adsetId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/adset-explorer/${tokenId}/${adsetId}/details`, { params });
+  return data; // { success, adset, metaInsights, orders }
+}
+
+export async function fetchAdSetOrders(tokenId, adsetId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/adset-explorer/${tokenId}/${adsetId}/orders`, { params });
+  return data; // { success, since, until, orders }
+}
+
+// ─── Ad Explorer + creative details (Phase 13 §5/§6/§9) ──────────
+// New, additive routes at /api/ad-explorer.
+
+export async function fetchAds(tokenId, { accountIds, since, until, campaignId, adsetId }) {
+  const params = new URLSearchParams();
+  params.append("since", since);
+  params.append("until", until ?? since);
+  if (campaignId) params.append("campaignId", campaignId);
+  if (adsetId) params.append("adsetId", adsetId);
+  (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(Boolean).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/ad-explorer/${tokenId}?${params}`);
+  return data; // { success, since, until, ads, summary }
+}
+
+// Ads nested under one ad set, fetched directly off the ad set object —
+// no adAccountId needed. Used by AdSetDrawer's Ads section.
+export async function fetchAdsByAdSet(tokenId, adsetId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/ad-explorer/${tokenId}/by-adset/${adsetId}`, { params });
+  return data; // { success, adsetId, ads }
+}
+
+export async function fetchAdDetails(tokenId, adId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/ad-explorer/${tokenId}/${adId}/details`, { params });
+  return data; // { success, ad, metaInsights, orders }
+}
+
+export async function fetchAdOrders(tokenId, adId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/ad-explorer/${tokenId}/${adId}/orders`, { params });
+  return data; // { success, since, until, orders }
+}
+
+export async function fetchAdCreative(tokenId, adId, { refresh } = {}) {
+  const params = {};
+  if (refresh) params.refresh = "1";
+  const { data } = await api.get(`/ad-explorer/${tokenId}/${adId}/creative`, { params });
+  return data; // { success, cached, creative }
+}
+
+// Batch id → name/context resolver, used so an orders table full of
+// ad/ad-set ids can show names without loading the full Ad Explorer
+// list. `adIds`/`adsetIds` are arrays; either may be omitted.
+export async function resolveAdAttribution(tokenId, { adIds = [], adsetIds = [] }) {
+  const params = {};
+  if (adIds.length) params.adIds = adIds.join(",");
+  if (adsetIds.length) params.adsetIds = adsetIds.join(",");
+  if (!params.adIds && !params.adsetIds) return { success: true, ads: [], adsets: [] };
+  const { data } = await api.get(`/ad-explorer/${tokenId}/resolve`, { params });
+  return data; // { success, ads, adsets }
+}
+
+// ─── Hourly Performance (Phase 13 §1/§2/§11/§15) ──────────────────
+// New, additive routes at /api/hourly.
+
+export async function fetchHourlyReport(tokenId, { accountIds, date, campaignId, adsetId, adId } = {}) {
+  const params = new URLSearchParams();
+  params.append("date", date);
+  if (campaignId) params.append("campaignId", campaignId);
+  if (adsetId) params.append("adsetId", adsetId);
+  if (adId) params.append("adId", adId);
+  (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(Boolean).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/hourly/${tokenId}?${params}`);
+  return data; // { success, date, scope, metaHourlyAvailable, hours, summary }
+}
+
+export async function fetchHourlyOrders(tokenId, { date, hour, campaignId, campaignName, adsetId, adId, paymentType } = {}) {
+  const params = { date, hour };
+  if (campaignId) params.campaignId = campaignId;
+  if (campaignName) params.campaignName = campaignName;
+  if (adsetId) params.adsetId = adsetId;
+  if (adId) params.adId = adId;
+  if (paymentType) params.paymentType = paymentType;
+  const { data } = await api.get(`/hourly/${tokenId}/orders`, { params });
+  return data; // { success, date, hour, orders }
+}
+
+// ─── Daily Hourly Intelligence (Phase 15) ─────────────────────────
+// Whole-day, all-campaigns hourly breakdown for the Daily page's
+// per-date drawer — distinct from fetchHourlyReport above, which is
+// always scoped to one campaign/ad set/ad (or a single account with no
+// campaign/ad-set/ad breakdown). See server/routes/dailyHourly.js.
+
+export async function fetchDailyHourlySummary(tokenId, { date, accountIds } = {}) {
+  const params = new URLSearchParams();
+  params.append("date", date);
+  (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(Boolean).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/daily-hourly/${tokenId}/summary?${params}`);
+  return data; // { success, date, hours, summary }
+}
+
+export async function fetchDailyHourOrders(tokenId, { date, hour, campaignId, campaignName, adsetId, adId, paymentType, deliveryBucket } = {}) {
+  const params = { date, hour };
+  if (campaignId) params.campaignId = campaignId;
+  if (campaignName) params.campaignName = campaignName;
+  if (adsetId) params.adsetId = adsetId;
+  if (adId) params.adId = adId;
+  if (paymentType) params.paymentType = paymentType;
+  if (deliveryBucket) params.deliveryBucket = deliveryBucket;
+  const { data } = await api.get(`/daily-hourly/${tokenId}/hour-orders`, { params });
+  return data; // { success, date, hour, orders }
+}
+
+// ─── Products — Product Cost Setup (Phase 16 §2) ──────────────────
+// New, additive routes at /api/products.
+
+export async function fetchProducts() {
+  const { data } = await api.get("/products");
+  return data; // { success, products }
+}
+export async function createProduct(payload) {
+  const { data } = await api.post("/products", payload);
+  return data; // { success, product }
+}
+export async function updateProduct(id, payload) {
+  const { data } = await api.put(`/products/${id}`, payload);
+  return data; // { success, product }
+}
+export async function deleteProduct(id) {
+  const { data } = await api.delete(`/products/${id}`);
+  return data; // { success }
+}
+
+// ─── Expenses — Operating Expenses (Phase 16 §7/§8/§9/§19) ────────
+// New, additive routes at /api/expenses.
+
+export async function fetchExpenses() {
+  const { data } = await api.get("/expenses");
+  return data; // { success, expenses }
+}
+export async function createExpense(payload) {
+  const { data } = await api.post("/expenses", payload);
+  return data; // { success, expense }
+}
+export async function updateExpense(id, payload) {
+  const { data } = await api.put(`/expenses/${id}`, payload);
+  return data; // { success, expense }
+}
+export async function deleteExpense(id) {
+  const { data } = await api.delete(`/expenses/${id}`);
+  return data; // { success }
+}
+
+// ─── Profitability (Phase 16) ──────────────────────────────────────
+// New, additive routes at /api/profitability. Every range-based call
+// takes plain YYYY-MM-DD since/until strings, same convention as
+// fetchDailyReport above.
+
+export async function fetchProfitSettings() {
+  const { data } = await api.get("/profitability/settings");
+  return data; // { success, codSuccessRate }
+}
+export async function updateProfitSettings(codSuccessRate) {
+  const { data } = await api.put("/profitability/settings", { codSuccessRate });
+  return data; // { success, codSuccessRate }
+}
+
+function accountParams(accountIds) {
+  const params = new URLSearchParams();
+  (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(Boolean).forEach((id) => params.append("adAccountId", id));
+  return params;
+}
+
+export async function fetchProfitSummary(tokenId, { accountIds, since, until }) {
+  const params = accountParams(accountIds);
+  params.append("since", since);
+  params.append("until", until ?? since);
+  const { data } = await api.get(`/profitability/${tokenId}/summary?${params}`);
+  return data; // { success, revenue, expenses, result, bestCampaign, worstCampaign, bestDay, highestProfitHour }
+}
+
+export async function fetchProfitCampaigns(tokenId, { accountIds, since, until }) {
+  const params = accountParams(accountIds);
+  params.append("since", since);
+  params.append("until", until ?? since);
+  const { data } = await api.get(`/profitability/${tokenId}/campaigns?${params}`);
+  return data; // { success, campaigns, totals }
+}
+
+export async function fetchProfitDaily(tokenId, { accountIds, since, until }) {
+  const params = accountParams(accountIds);
+  params.append("since", since);
+  params.append("until", until ?? since);
+  const { data } = await api.get(`/profitability/${tokenId}/daily?${params}`);
+  return data; // { success, days, totals }
+}
+
+export async function fetchProfitHourly(tokenId, { accountIds, date }) {
+  const params = accountParams(accountIds);
+  params.append("date", date);
+  const { data } = await api.get(`/profitability/${tokenId}/hourly?${params}`);
+  return data; // { success, hours, dayTotals }
+}
+
+export async function fetchProfitCodPrepaid(tokenId, { accountIds, since, until }) {
+  const params = accountParams(accountIds);
+  params.append("since", since);
+  params.append("until", until ?? since);
+  const { data } = await api.get(`/profitability/${tokenId}/cod-prepaid?${params}`);
+  return data; // { success, prepaid, cod }
+}
+
+export async function fetchProfitProducts(tokenId, { accountIds, since, until }) {
+  const params = accountParams(accountIds);
+  params.append("since", since);
+  params.append("until", until ?? since);
+  const { data } = await api.get(`/profitability/${tokenId}/products?${params}`);
+  return data; // { success, products }
 }

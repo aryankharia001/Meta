@@ -35,7 +35,15 @@ import { usePreferences } from "../lib/PreferencesContext";
 import { currency, formatDate, formatDateTime } from "../lib/format";
 import { recordRecentlyViewed } from "../lib/recentlyViewed";
 import CampaignLink from "./CampaignLink";
+// Phase 13 §7/§19 — the Ad Set/Ad fields already existed as plain text
+// here; this just makes them clickable (opens the new Ad Set/Ad
+// drawers) when an id is present, and falls back to "Unmatched" —
+// never a guess — when it isn't. Doesn't touch how these fields are
+// fetched or matched.
+import AdSetLink from "./AdSetLink";
+import AdLink from "./AdLink";
 import FavoriteButton from "./FavoriteButton";
+import { useOverlayEscape } from "../lib/overlayStack";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 4 — Order Drawer. The single, shared component every order
@@ -124,12 +132,7 @@ export default function OrderDrawer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrder?.orderId]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => e.key === "Escape" && closeOrder();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, closeOrder]);
+  useOverlayEscape(open, closeOrder);
 
   useEffect(() => {
     if (!open) return;
@@ -575,8 +578,38 @@ export default function OrderDrawer() {
                     }
                   />
                   <Field label="Campaign ID" value={o.attribution.campaignId || "N/A"} />
-                  <Field label="Ad Set Name" value={o.attribution.adsetName || "N/A"} />
-                  <Field label="Ad Name" value={o.attribution.adName || "N/A"} />
+                  <Field
+                    label="Ad Set"
+                    value={
+                      <AdSetLink
+                        tokenId={activeOrder?.tokenId}
+                        adsetId={o.attribution.adsetId}
+                        adsetName={o.attribution.adsetName}
+                        campaignId={o.attribution.campaignId}
+                        campaignName={o.attribution.campaignName}
+                        since={o.orderDate}
+                        until={o.orderDate}
+                        className="!text-sm"
+                      />
+                    }
+                  />
+                  <Field
+                    label="Ad"
+                    value={
+                      <AdLink
+                        tokenId={activeOrder?.tokenId}
+                        adId={o.attribution.adId}
+                        adName={o.attribution.adName}
+                        adsetId={o.attribution.adsetId}
+                        adsetName={o.attribution.adsetName}
+                        campaignId={o.attribution.campaignId}
+                        campaignName={o.attribution.campaignName}
+                        since={o.orderDate}
+                        until={o.orderDate}
+                        className="!text-sm"
+                      />
+                    }
+                  />
                   <Field label="UTM Campaign" value={o.attribution.utmCampaign || "N/A"} />
                   <Field label="UTM Source" value={o.attribution.utmSource || "N/A"} />
                   <Field label="UTM Medium" value={o.attribution.utmMedium || "N/A"} />

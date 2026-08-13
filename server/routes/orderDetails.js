@@ -153,7 +153,15 @@ function shapeOrderDetails(order) {
     attribution: {
       campaignId: order.campaignId || null,
       campaignName: order.campaignName || null,
+      adsetId: order.adsetId || null,
       adsetName: order.adsetName || null,
+      // Phase 13 §7/§19 — adId was already stored per order but never
+      // exposed here. The ad's NAME isn't stored on the order at all
+      // (only its id), so the frontend resolves it on demand via
+      // GET /ad-explorer/:tokenId/:adId/details — this field is just the
+      // stored id, never fabricated, and stays null exactly when the
+      // order never carried one.
+      adId: order.adId || null,
       adName: raw?.ad_name || raw?.cart_data?.custom_attributes?.ad_name || null,
       utmCampaign: order.campaignName || null,
       utmSource: order.trackSource || null,

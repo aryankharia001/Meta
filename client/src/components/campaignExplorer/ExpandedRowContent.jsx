@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
-import { fetchCampaignBreakdown } from "../../lib/api";
+import { BarChart3, Layers, Clock4 } from "lucide-react";
+import { fetchCampaignBreakdown, fetchAdSetsByCampaign } from "../../lib/api";
 import { getCachedCampaignBreakdown, setCachedCampaignBreakdown } from "../../lib/campaignExplorerCache";
 import { ChartCard, StyledTooltip, Leaderboard, CHART_COLORS } from "../analytics/chartKit";
-import { currency, number, formatDate } from "../../lib/format";
+import { currency, number, formatDate, multiplier } from "../../lib/format";
+import { roasClass } from "../../lib/campaignDisplay";
 import { DELIVERY_LABELS } from "../../lib/analyticsUtils";
+import { useAdSetDrawer } from "../../lib/AdSetDrawerContext";
+import HourlyPanel from "../hourly/HourlyPanel";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — expandable-row content. Lazily fetches
@@ -20,6 +24,25 @@ export default function ExpandedRowContent({ campaign, tokenId, since, until }) 
   const [data, setData] = useState(() => getCachedCampaignBreakdown(tokenId, campaign.campaignId, since, until));
   const [loading, setLoading] = useState(!data);
   const [error, setError] = useState("");
+
+  // Phase 13 §3 — Campaign → Ad Set → Ad hierarchy + Hourly, as extra
+  // views within this same expandable row rather than a second expand
+  // level, so the table doesn't get taller by default. "Overview" (the
+  // existing Phase 8 charts) stays the default view — nothing about it
+  // changes below.
+  const [view, setView] = useState("overview"); // overview | adsets | hourly
+  const { openAdSet } = useAdSetDrawer();
+  const [adSets, setAdSets] = useState(null);
+  const [adSetsLoading, setAdSetsLoading] = useState(false);
+  useEffect(() => {
+    if (view !== "adsets" || adSets !== null) return;
+    setAdSetsLoading(true);
+    fetchAdSetsByCampaign(tokenId, campaign.campaignId, { since, until })
+      .then((res) => setAdSets(res.adsets || []))
+      .catch(() => setAdSets([]))
+      .finally(() => setAdSetsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, tokenId, campaign.campaignId, since, until]);
 
   useEffect(() => {
     const cached = getCachedCampaignBreakdown(tokenId, campaign.campaignId, since, until);
@@ -45,33 +68,115 @@ export default function ExpandedRowContent({ campaign, tokenId, since, until }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenId, campaign.campaignId, since, until]);
 
+  const trend = (data?.trend || []).map((t) => ({ ...t, name: formatDate(t.date) }));
+  const paymentSplit = [
+    { name: "Prepaid", value: data?.paymentSplit?.prepaid || 0 },
+    { name: "COD", value: data?.paymentSplit?.cod || 0 },
+  ].filter((r) => r.value > 0);
+  const deliveryRows = Object.entries(data?.deliveryDistribution || {})
+    .filter(([, v]) => v > 0)
+    .map(([key, value]) => ({ key, label: DELIVERY_LABELS[key] || key, value }));
+
+  const ViewSwitcher = (
+    <div className="flex items-center gap-1.5 mb-1">
+      {[
+        { key: "overview", label: "Overview", icon: BarChart3 },
+        { key: "adsets", label: "Ad Sets", icon: Layers },
+        { key: "hourly", label: "Hourly", icon: Clock4 },
+      ].map((t) => (
+        <button
+          key={t.key}
+          type="button"
+          onClick={() => setView(t.key)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+            view === t.key ? "bg-indigo-600 text-white" : "bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
+          }`}
+        >
+          <t.icon size={12} /> {t.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (view === "adsets") {
+    return (
+      <div className="p-5 space-y-3">
+        {ViewSwitcher}
+        {adSetsLoading ? (
+          <div className="text-sm text-slate-400 py-4">Loading ad sets…</div>
+        ) : !adSets || adSets.length === 0 ? (
+          <div className="text-sm text-slate-400 py-4">No ad sets found for this campaign in Meta.</div>
+        ) : (
+          <div className="card p-0 overflow-x-auto">
+            <table className="table">
+              <thead>
+                <tr><th>Ad Set</th><th>Status</th><th className="text-right">Spend</th><th className="text-right">ROAS</th><th className="text-right">Orders</th><th className="text-right">Revenue</th></tr>
+              </thead>
+              <tbody>
+                {adSets.map((a) => (
+                  <tr
+                    key={a.adsetId}
+                    className="cursor-pointer"
+                    onClick={() => openAdSet({ tokenId, adsetId: a.adsetId, adsetName: a.adsetName, campaignId: campaign.campaignId, campaignName: campaign.campaignName, since, until })}
+                  >
+                    <td className="font-medium text-slate-700">{a.adsetName}</td>
+                    <td>{a.effectiveStatus || a.status || "N/A"}</td>
+                    <td className="text-right">{currency(a.spend)}</td>
+                    <td className={`text-right ${roasClass(a.roas)}`}>{multiplier(a.roas)}</td>
+                    <td className="text-right">{a.totalOrders}</td>
+                    <td className="text-right">{currency(a.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (view === "hourly") {
+    return (
+      <div className="p-5 space-y-3">
+        {ViewSwitcher}
+        <HourlyPanel
+          tokenId={tokenId}
+          campaignId={campaign.campaignId}
+          campaignName={campaign.campaignName}
+          tableIdSuffix={`explorer-${campaign.campaignId}`}
+          title=""
+        />
+      </div>
+    );
+  }
+
   if (loading) {
     return (
-      <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="card h-56 animate-pulse bg-slate-100" />
-        ))}
+      <div className="p-5 space-y-3">
+        {ViewSwitcher}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="card h-56 animate-pulse bg-slate-100" />
+          ))}
+        </div>
       </div>
     );
   }
 
   if (error) {
-    return <div className="p-5 text-sm text-rose-600">{error}</div>;
+    return (
+      <div className="p-5 space-y-3">
+        {ViewSwitcher}
+        <div className="text-sm text-rose-600">{error}</div>
+      </div>
+    );
   }
 
   if (!data) return null;
 
-  const trend = (data.trend || []).map((t) => ({ ...t, name: formatDate(t.date) }));
-  const paymentSplit = [
-    { name: "Prepaid", value: data.paymentSplit?.prepaid || 0 },
-    { name: "COD", value: data.paymentSplit?.cod || 0 },
-  ].filter((r) => r.value > 0);
-  const deliveryRows = Object.entries(data.deliveryDistribution || {})
-    .filter(([, v]) => v > 0)
-    .map(([key, value]) => ({ key, label: DELIVERY_LABELS[key] || key, value }));
-
   return (
     <div className="p-5 space-y-4">
+      {ViewSwitcher}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartCard title="Revenue &amp; Spend Trend" height={220} empty={trend.length === 0}>
           <AreaChart data={trend}>

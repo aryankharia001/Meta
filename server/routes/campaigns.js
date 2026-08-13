@@ -633,6 +633,17 @@ function extractCourier(raw) {
   return raw?.courier_name || raw?.courier || raw?.shipment?.courier_name || raw?.shipments?.[0]?.courier_name || null;
 }
 
+// Same probing logic as orderDetails.js's extractAwb() — duplicated
+// locally rather than imported, following this codebase's existing
+// convention of duplicating small raw-payload extractors per file (see
+// extractCourier/extractDeliveryStatus/extractOrderStatus above, which
+// are already duplicated between this file and orderDetails.js). There
+// is no dedicated top-level `awb` field on the ShiprocketOrder model
+// (checked models/shiprocketorder.js), so it has to come from `raw`.
+function extractAwb(raw) {
+  return raw?.awb || raw?.awb_code || raw?.awb_number || raw?.shipments?.[0]?.awb || raw?.shipments?.[0]?.awb_code || null;
+}
+
 function extractOrderStatus(raw) {
   return raw?.order_status || raw?.status || null;
 }
@@ -668,6 +679,15 @@ function shapeOrderForDrawer(o) {
     courier: extractCourier(o.raw),
     orderStatus: extractOrderStatus(o.raw),
     deliveryStatus: extractDeliveryStatus(o.raw),
+    // Additive fields for the Campaign Drawer's stat drill-down tables
+    // (Prepaid/COD/etc. order lists) — AWB from the raw payload (same
+    // convention as courier/status above), ad set/ad attribution from
+    // the ShiprocketOrder document's own top-level fields (populated at
+    // sync/match time, not derived/guessed).
+    awb: extractAwb(o.raw),
+    adsetId: o.adsetId || null,
+    adsetName: o.adsetName || null,
+    adId: o.adId || null,
   };
 }
 
@@ -776,7 +796,7 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       orderDate: { $gte: since, $lte: until },
     })
       .select(
-        "orderId orderDate campaignId campaignName totalAmountPayable paymentType paymentStatus orderCreatedAt phone address raw"
+        "orderId orderDate campaignId campaignName totalAmountPayable paymentType paymentStatus orderCreatedAt phone address raw adsetId adsetName adId"
       )
       .lean();
 

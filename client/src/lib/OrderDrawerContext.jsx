@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState } from "react";
+import { logActivity } from "./api";
 
 // Mounted once, above <Routes> in App.jsx — same pattern as
 // ShiprocketSyncContext and CampaignDrawerContext. This is the deepest
@@ -21,6 +22,9 @@ export function OrderDrawerProvider({ children }) {
   const openOrder = useCallback((meta) => {
     if (!meta?.orderId) return;
     setActiveOrder(meta);
+    // Phase 14 §6 — "Order opened" / "Order details viewed". Fire-and-
+    // forget, doesn't touch the actual fetch/render path below.
+    logActivity("order_opened", `Order opened (#${meta.orderId})`, {}, "order", meta.orderId);
   }, []);
 
   const closeOrder = useCallback(() => setActiveOrder(null), []);

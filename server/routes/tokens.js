@@ -1,5 +1,6 @@
 import express from "express";
 import Token from "../models/Token.js";
+import { recordActivity } from "../lib/activityLog.js";
 
 const router = express.Router();
 
@@ -46,6 +47,16 @@ router.post("/", async (req, res) => {
       note: (note || "").trim(),
     });
 
+    // Phase 14 §6/§7 §Security — logs that a token was added and its
+    // label, NEVER the accessToken value itself.
+    await recordActivity({
+      user: req.user?.email,
+      type: "meta_token_added",
+      message: `Added Meta Access Token${token.label ? ` (${token.label})` : ""}`,
+      entityType: "token",
+      entityId: String(token._id),
+    });
+
     res.status(201).json({ success: true, data: token });
   } catch (err) {
     if (err.code === 11000) {
@@ -78,6 +89,14 @@ router.put("/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "Token not found" });
     }
 
+    await recordActivity({
+      user: req.user?.email,
+      type: "meta_token_updated",
+      message: `Updated Meta Access Token${token.label ? ` (${token.label})` : ""}`,
+      entityType: "token",
+      entityId: String(token._id),
+    });
+
     res.json({ success: true, data: token });
   } catch (err) {
     if (err.code === 11000) {
@@ -95,6 +114,15 @@ router.delete("/:id", async (req, res) => {
     if (!token) {
       return res.status(404).json({ success: false, message: "Token not found" });
     }
+
+    await recordActivity({
+      user: req.user?.email,
+      type: "meta_token_deleted",
+      message: `Deleted Meta Access Token${token.label ? ` (${token.label})` : ""}`,
+      entityType: "token",
+      entityId: String(token._id),
+    });
+
     res.json({ success: true, message: "Token deleted" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

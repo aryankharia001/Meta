@@ -21,6 +21,17 @@ export const formatDate = (d) => {
   return date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 };
 
+// Time-only formatter (no date portion) — for tables that already show
+// Order Date as its own column and want a separate Order Time column
+// derived from the same timestamp, rather than repeating the full
+// formatDateTime() string in both.
+export const formatTime = (d) => {
+  if (!d) return "N/A";
+  const date = new Date(d);
+  if (isNaN(date.getTime())) return "N/A";
+  return date.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+};
+
 export const formatDateTime = (d) => {
   if (!d) return "N/A";
   const date = new Date(d);

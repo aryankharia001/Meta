@@ -9,6 +9,7 @@ import { recordRecentlyViewed } from "../lib/recentlyViewed";
 import CampaignLink from "./CampaignLink";
 import FavoriteButton from "./FavoriteButton";
 import EntityNotesPanel from "./EntityNotesPanel";
+import { useOverlayEscape } from "../lib/overlayStack";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 7 — Customer Drawer. This app never had a standalone customer
@@ -62,12 +63,7 @@ export default function CustomerDrawer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCustomer?.phone]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => e.key === "Escape" && closeCustomer();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, closeCustomer]);
+  useOverlayEscape(open, closeCustomer);
 
   useEffect(() => {
     if (!open) return;

@@ -1,17 +1,12 @@
-import { useEffect } from "react";
 import { X } from "lucide-react";
+import { useOverlayEscape } from "../lib/overlayStack";
 
-// Small shared placeholder modal — used by CampaignDrawer for KPI-card
-// clicks ("designed as clickable... for future phases") and order-row
-// clicks (Phase 3 stub). Not wired into Dashboard.jsx's own KPI modal,
+// Small shared modal — used by CampaignDrawer for scalar-KPI-card
+// clicks (Spend/ROAS/AOV/CPO — values with no order collection behind
+// them) and similar. Not wired into Dashboard.jsx's own KPI modal,
 // which stays exactly as Phase 1 left it.
 export default function InfoModal({ open, title, subtitle, icon: Icon, accentClass, body, onClose }) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useOverlayEscape(open, onClose);
 
   if (!open) return null;
 

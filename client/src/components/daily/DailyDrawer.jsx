@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
-import { X, AlertTriangle, RefreshCw, Inbox, Search, Download } from "lucide-react";
-import { fetchDailyDetail } from "../../lib/api";
+import { X, AlertTriangle, RefreshCw, Inbox, Search, Download, ChevronDown, ChevronRight, Clock4, Layers } from "lucide-react";
+import { fetchDailyDetail, fetchAdSetsByCampaign } from "../../lib/api";
 import { currency, number, multiplier, formatDateTime } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
 import { formatBudget, roasClass } from "../../lib/campaignDisplay";
 import { downloadCsv } from "../../lib/csv";
 import { useOrderDrawer } from "../../lib/OrderDrawerContext";
+// Phase 13 §12 — optional Ad Set/Hourly hierarchy for this exact
+// (date, campaign), collapsed by default so the Daily page stays clean.
+import { useAdSetDrawer } from "../../lib/AdSetDrawerContext";
+import HourlyPanel from "../hourly/HourlyPanel";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 — Daily row drill-down. Opened when a (day, campaign) row
@@ -20,11 +24,27 @@ import { useOrderDrawer } from "../../lib/OrderDrawerContext";
 export default function DailyDrawer({ meta, onClose }) {
   const open = !!meta;
   const { openOrder } = useOrderDrawer();
+  const { openAdSet } = useAdSetDrawer();
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+
+  // Phase 13 §12 — collapsed by default; only fetched once expanded.
+  const [hierarchyOpen, setHierarchyOpen] = useState(false);
+  const [adSets, setAdSets] = useState([]);
+  const [adSetsLoading, setAdSetsLoading] = useState(false);
+  useEffect(() => {
+    if (!hierarchyOpen || !meta?.campaignId || meta.isUnmatched) return;
+    let cancelled = false;
+    setAdSetsLoading(true);
+    fetchAdSetsByCampaign(meta.tokenId, meta.campaignId, { since: meta.date, until: meta.date })
+      .then((res) => !cancelled && setAdSets(res.adsets || []))
+      .catch(() => !cancelled && setAdSets([]))
+      .finally(() => !cancelled && setAdSetsLoading(false));
+    return () => { cancelled = true; };
+  }, [hierarchyOpen, meta?.tokenId, meta?.campaignId, meta?.date, meta?.isUnmatched]);
 
   // The panel fades out over 300ms (see the `open ? ... : ...` classes
   // below) rather than unmounting instantly, but `meta` itself goes
@@ -144,6 +164,62 @@ export default function DailyDrawer({ meta, onClose }) {
                   <Stat label="Products Sold" value={number(data.metrics.totalProductsSold)} />
                   <Stat label="Units Sold" value={number(data.metrics.totalUnitsSold)} />
                 </div>
+
+                {!meta.isUnmatched && meta.campaignId && (
+                  <div className="card p-0 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setHierarchyOpen((v) => !v)}
+                      className="w-full flex items-center justify-between gap-2 px-4 py-3 text-sm font-display font-semibold text-slate-700"
+                    >
+                      <span className="flex items-center gap-2">
+                        {hierarchyOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        Ad Set &amp; Hourly Breakdown
+                      </span>
+                      <span className="text-[11px] font-normal text-slate-400">Campaign → Ad Set → Ad → Orders, and Hour → Orders</span>
+                    </button>
+                    {hierarchyOpen && (
+                      <div className="border-t border-slate-100 px-4 py-4 space-y-5">
+                        <div>
+                          <h4 className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                            <Layers size={12} /> Ad Sets
+                          </h4>
+                          {adSetsLoading ? (
+                            <p className="text-sm text-slate-400">Loading ad sets…</p>
+                          ) : adSets.length === 0 ? (
+                            <p className="text-sm text-slate-400">No ad sets found for this campaign/date.</p>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {adSets.map((a) => (
+                                <button
+                                  key={a.adsetId}
+                                  type="button"
+                                  className="btn btn-secondary btn-sm !py-1"
+                                  onClick={() => openAdSet({ tokenId: meta.tokenId, adsetId: a.adsetId, adsetName: a.adsetName, campaignId: meta.campaignId, campaignName: meta.campaignName, since: meta.date, until: meta.date })}
+                                >
+                                  {a.adsetName} · {a.totalOrders} order{a.totalOrders === 1 ? "" : "s"}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <h4 className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                            <Clock4 size={12} /> Hourly
+                          </h4>
+                          <HourlyPanel
+                            tokenId={meta.tokenId}
+                            campaignId={meta.campaignId}
+                            campaignName={meta.campaignName}
+                            fixedDate={meta.date}
+                            tableIdSuffix={`daily-${meta.campaignId}`}
+                            title=""
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="card p-0 overflow-hidden">
                   <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-100 flex-wrap">

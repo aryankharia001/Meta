@@ -259,12 +259,30 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
   return (
     <div className="card p-0 overflow-auto max-h-[420px]">
       <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
-        <thead className="sticky top-0 z-[1]">
+        {/* Phase 14 §11/§12 — same header/pinned-column z-index fix as
+            ExplorerTable.jsx: header cells and the pinned Campaign
+            column previously shared the SAME z-index (z-[1]), which
+            meant the body's pinned <td> — coming later in DOM order —
+            painted on top of the header on ties. Two clear tiers now:
+            header cells (20) always above the pinned body column (10).
+
+            Follow-up fix — the <thead> itself was left with its own
+            redundant `sticky top-0` even after every <th> started
+            declaring the same stickiness itself. Having both the
+            table-header-group AND its cells independently sticky on the
+            same (vertical) axis is a known trigger for browsers to
+            miscompute the horizontal offset of a doubly-sticky corner
+            cell — that's why the pinned Campaign column's header text
+            was scrolling away horizontally while its body column (whose
+            <tr> isn't itself sticky) stayed correctly pinned. Vertical
+            stickiness now lives entirely on each <th>; <thead> declares
+            no position of its own. */}
+        <thead>
           <tr>
             {COLS.map((c) => (
               <th
                 key={c.key}
-                className={`cursor-pointer select-none ${NUM_KEYS.has(c.key) ? "num" : ""} ${c.key === "campaignName" ? "sticky left-0 z-[2] bg-slate-50" : ""}`}
+                className={`cursor-pointer select-none sticky top-0 z-20 bg-slate-50 ${NUM_KEYS.has(c.key) ? "num" : ""} ${c.key === "campaignName" ? "left-0 shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""}`}
                 style={{ minWidth: c.defaultWidth || 110 }}
                 onClick={() => handleSort(c.key)}
               >
@@ -287,10 +305,10 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
                 {COLS.map((col) => {
                   if (col.key === "campaignName") {
                     return (
-                      <td key={col.key} className="sticky left-0 z-[1] bg-white">
+                      <td key={col.key} className="sticky left-0 z-10 bg-white">
                         <div className="flex items-center gap-2 min-w-0">
-                          <span className="campaign-name truncate max-w-[170px]">{c.campaignName}</span>
                           <LiveIndicator campaign={c} />
+                          <span className="campaign-name truncate max-w-[170px]">{c.campaignName}</span>
                         </div>
                       </td>
                     );

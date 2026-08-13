@@ -9,11 +9,18 @@ import {
   CreditCard,
   Truck,
   Clock,
+  Clock4,
+  Layers,
+  Images,
   AlertTriangle,
   RefreshCw,
   X,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { fetchAnalyticsOrders, fetchLiveAdAccounts, fetchLiveCampaigns } from "../lib/api";
+// Phase 13 §14 — Analytics' new Hourly tab, reusing the same panel every
+// other Hourly integration point uses.
+import HourlyPanel from "../components/hourly/HourlyPanel";
 import { getCachedAnalyticsOrders, setCachedAnalyticsOrders } from "../lib/analyticsCache";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
@@ -73,6 +80,11 @@ const TABS = [
   { key: "payments", label: "Payments", icon: CreditCard },
   { key: "delivery", label: "Delivery", icon: Truck },
   { key: "time", label: "Time-Based", icon: Clock },
+  // Phase 13 §14 — lets users switch into Hourly analysis from the same
+  // tab bar, without duplicating a second analytics engine — it renders
+  // the same HourlyPanel every other integration point uses, scoped to
+  // whichever ad accounts are selected above.
+  { key: "hourly", label: "Hourly", icon: Clock4 },
 ];
 
 export default function AnalyticsPage() {
@@ -419,6 +431,16 @@ export default function AnalyticsPage() {
             {activeTab === "payments" && <PaymentSection {...sectionProps} />}
             {activeTab === "delivery" && <DeliverySection {...sectionProps} />}
             {activeTab === "time" && <TimeSection {...sectionProps} />}
+            {activeTab === "hourly" && (
+              <div>
+                <div className="flex items-center gap-2 mb-4 text-xs text-slate-500">
+                  <span>Ad Set- and Ad-level breakdowns live in their own explorers:</span>
+                  <Link to="/adset-explorer" className="btn btn-secondary btn-sm !py-1"><Layers size={12} /> Ad Set Explorer</Link>
+                  <Link to="/ad-explorer" className="btn btn-secondary btn-sm !py-1"><Images size={12} /> Ad Explorer</Link>
+                </div>
+                <HourlyPanel tokenId={TOKEN_ID} accountIds={selectedAccounts} tableIdSuffix="analytics" title="Hourly Performance" />
+              </div>
+            )}
           </div>
         )}
       </div>

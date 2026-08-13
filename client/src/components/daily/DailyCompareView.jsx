@@ -67,8 +67,8 @@ export default function DailyCompareView({ days, onOpenRow }) {
                       title="Open this campaign's 24-hour detail for this date"
                     >
                       <span className="inline-flex items-center gap-1.5">
-                        {c.campaignName}
                         <LiveIndicator status={c.effectiveStatus || c.status} />
+                        {c.campaignName}
                       </span>
                     </th>
                   ))}

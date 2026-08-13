@@ -6,6 +6,32 @@ import { todayIstIso } from "../utils/dateIst.js";
 
 const router = express.Router();
 
+// Phase 14 §4 — same small helper duplicated in analytics.js/campaigns.js/
+// campaignExplorer.js/dailyReports.js/orderDetails.js (zero-coupling
+// convention: every route keeps its own copy rather than importing from a
+// sibling route file). Used only to enrich the newOrderRecords payload
+// below with a delivery status string for richer notifications — does not
+// touch the sync/diff logic above.
+function extractDeliveryStatus(raw) {
+  return (
+    raw?.shipment_status ||
+    raw?.delivery_status ||
+    raw?.current_status ||
+    raw?.shipments?.[0]?.status ||
+    raw?.shipments?.[0]?.delivery_status ||
+    null
+  );
+}
+
+function extractOrderStatus(raw) {
+  return raw?.order_status || raw?.status || null;
+}
+
+function extractCustomerName(address) {
+  const name = [address?.firstName, address?.lastName].filter(Boolean).join(" ").trim();
+  return name || null;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Phase 5 — Live Sync backend
 // ─────────────────────────────────────────────────────────────
@@ -44,7 +70,11 @@ const router = express.Router();
 
 async function snapshotToday(today) {
   const docs = await ShiprocketOrder.find({ orderDate: today })
-    .select("orderId campaignId campaignName totalAmountPayable paymentType orderCreatedAt")
+    // Phase 14 §4 — added address/paymentStatus/raw so newOrderRecords
+    // below can report customer name + delivery status for richer
+    // notifications. Purely additive to this read-only snapshot query;
+    // does not change what gets written/matched anywhere.
+    .select("orderId campaignId campaignName totalAmountPayable paymentType paymentStatus address orderCreatedAt raw")
     .lean();
   return docs;
 }
@@ -89,6 +119,12 @@ router.post("/run", async (req, res) => {
         totalAmountPayable: d.totalAmountPayable,
         paymentType: d.paymentType || null,
         orderDate: today,
+        // Phase 14 §4 — added for richer notification cards. Additive
+        // only; every existing field above is untouched.
+        customerName: extractCustomerName(d.address),
+        paymentStatus: d.paymentStatus || null,
+        orderStatus: extractOrderStatus(d.raw),
+        deliveryStatus: extractDeliveryStatus(d.raw),
       })),
     });
   } catch (err) {

@@ -66,6 +66,12 @@ export default function DataTable({
   exportFilename,
   stickyFirstColumn = false,
   emptyMessage = "No data to show.",
+  // Phase 13 — optional list of column keys that start hidden the first
+  // time this tableId is ever rendered (e.g. Ad Set/Ad Explorer's
+  // less-used metadata columns). Purely additive: omitted by every
+  // pre-existing caller, which keeps their previous "everything visible
+  // by default" behavior unchanged.
+  defaultHiddenKeys = [],
 }) {
   const { prefs } = usePreferences();
   const saved = useMemo(() => loadTablePrefs(tableId), [tableId]);
@@ -83,7 +89,7 @@ export default function DataTable({
   // built on DataTable automatically gets drag-to-reorder + Reset
   // Columns for free, with the same storage schema every other
   // retrofitted table in this phase uses.
-  const { orderedColumns: visibleColumns, allColumnsOrdered, hidden, toggleHidden, reorder, reset } = useColumnPrefs(tableId, columns);
+  const { orderedColumns: visibleColumns, allColumnsOrdered, hidden, toggleHidden, reorder, reset } = useColumnPrefs(tableId, columns, defaultHiddenKeys);
 
   useEffect(() => {
     saveTablePrefs(tableId, { sortConfig, widths, pageSize });
@@ -166,13 +172,22 @@ export default function DataTable({
 
       <div className="card p-0 overflow-auto max-h-[520px]">
         <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
-          <thead className="sticky top-0 z-[2]">
+          {/* Phase 14 §12 — thead itself declares no position/sticky of
+              its own; every <th> declares `sticky top-0` individually
+              (see ExplorerTable.jsx/LiveMonitoringSection.jsx for the
+              full explanation — a table-header-group that's
+              independently sticky on the same axis as one of its own
+              doubly-sticky corner cells is a known trigger for browsers
+              to miscompute that cell's OTHER (horizontal) sticky
+              offset). stickyFirstColumn isn't used by any page yet, but
+              this keeps it correct for whenever it is. */}
+          <thead>
             <tr>
               {visibleColumns.map((c, i) => (
                 <th
                   key={c.key}
-                  className={`relative select-none ${c.sortable !== false ? "cursor-pointer" : ""} ${
-                    stickyFirstColumn && i === 0 ? "sticky left-0 z-[3] bg-slate-50" : ""
+                  className={`relative select-none sticky top-0 z-[2] bg-slate-50 ${c.sortable !== false ? "cursor-pointer" : ""} ${
+                    stickyFirstColumn && i === 0 ? "left-0 z-[3]" : ""
                   }`}
                   style={{ width: widths[c.key] || c.defaultWidth || undefined }}
                   onClick={() => c.sortable !== false && handleSort(c.key)}

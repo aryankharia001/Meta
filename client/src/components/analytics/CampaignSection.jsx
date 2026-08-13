@@ -73,8 +73,8 @@ export default function CampaignSection({ campaignData, tokenId, since, until })
     <tr key={c.campaignId}>
       <td>
         <div className="flex items-center gap-2 min-w-0">
-          <CampaignLink tokenId={tokenId} campaignId={c.campaignId} campaignName={c.campaignName} accountId={c.accountId} since={since} until={until} className="campaign-name truncate max-w-[170px]" />
           <LiveIndicator status={c.effectiveStatus || c.status} />
+          <CampaignLink tokenId={tokenId} campaignId={c.campaignId} campaignName={c.campaignName} accountId={c.accountId} since={since} until={until} className="campaign-name truncate max-w-[170px]" />
         </div>
       </td>
       <td className="num">

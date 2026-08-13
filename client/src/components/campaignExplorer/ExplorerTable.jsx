@@ -238,19 +238,45 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
         </div>
       </div>
 
+      {/* Phase 14 §11/§12 — sticky-header/sticky-column layering fix.
+          Root cause #1: only the <thead> itself had `sticky top-0`, and
+          pinned header <th>s relied on inheriting that vertical
+          stickiness from their parent while carrying their OWN higher
+          z-index (30) for horizontal pinning — a fragile split that, in
+          some browsers/zoom levels, let a pinned body <td> (also
+          `position: sticky`, its own stacking context) paint over the
+          header edge as it scrolled past. Fix: every header <th> now
+          declares `sticky top-0` itself (not just the <thead> wrapper),
+          so vertical stickiness never depends on thead's own sticky
+          support, and there are exactly two z tiers everywhere in this
+          table — header cells (20) and pinned body cells (10) — instead
+          of a third, higher one (30) that only pinned header cells had.
+
+          Root cause #2 (found after the above): the <thead> was left
+          with its OWN redundant `sticky top-0` even after every <th>
+          started declaring the same thing itself. A table-header-group
+          element and its cells BOTH being independently sticky on the
+          same axis is a well-known trigger for browsers to miscompute
+          the *other* axis's sticky offset on a doubly-sticky corner
+          cell — in practice this showed up as the pinned Campaign
+          column's header text scrolling away horizontally while the
+          body column (whose <tr> is not itself sticky) stayed pinned
+          correctly. Fix: <thead> no longer declares its own
+          position/sticky at all — vertical stickiness lives entirely on
+          each <th>, which was already the source of truth. */}
       <div className="card p-0 overflow-auto max-h-[70vh]">
         <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
-          <thead className="sticky top-0 z-20">
+          <thead>
             <tr>
-              <th className="sticky left-0 z-30 bg-slate-50 !w-11" style={{ width: 44 }}>
+              <th className="sticky top-0 left-0 z-20 bg-slate-50 !w-11" style={{ width: 44 }}>
                 <input type="checkbox" checked={allOnPageSelected} onChange={() => onToggleSelectAll(paged.map((c) => c.campaignId))} />
               </th>
-              <th className="sticky z-30 bg-slate-50" style={{ left: 44, width: 32 }} />
+              <th className="sticky top-0 z-20 bg-slate-50" style={{ left: 44, width: 32 }} />
               {visibleColumns.map((c) => (
                 <th
                   key={c.key}
-                  className={`relative select-none cursor-pointer ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""} ${
-                    pinnedCols.has(c.key) ? "sticky z-30 bg-slate-50 shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""
+                  className={`relative select-none cursor-pointer sticky top-0 z-20 bg-slate-50 ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""} ${
+                    pinnedCols.has(c.key) ? "shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""
                   }`}
                   style={{ width: widths[c.key] || c.defaultWidth, left: pinnedCols.has(c.key) ? pinnedLeftOffsets[c.key] : undefined }}
                   onClick={() => handleSort(c.key)}
@@ -304,8 +330,8 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
                           return (
                             <td key={col.key} className={pinClass} style={style}>
                               <div className="flex items-center gap-2 min-w-0">
-                                <span className="campaign-name truncate max-w-[190px]">{c.campaignName}</span>
                                 <LiveIndicator campaign={c} />
+                                <span className="campaign-name truncate max-w-[190px]">{c.campaignName}</span>
                               </div>
                             </td>
                           );

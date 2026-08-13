@@ -11,19 +11,17 @@ import { multiplier } from "../lib/format";
 // none of these touch data fetching, matching, or sync.
 // ────────────────────────────────────────────────────────────────
 
-// A subtle glowing "● LIVE" indicator — soft outer glow + gentle pulse
-// (see .live-dot/.live-indicator in index.css), replacing the old flat
-// colored-circle status dot. Renders nothing for non-live campaigns so
-// callers can drop it in unconditionally.
+// Phase 14 §9/§10 — extremely minimal live indicator: just the small
+// glowing/pulsing dot (see .live-dot in index.css), no "LIVE" text, no
+// badge/pill. Renders nothing for non-live campaigns so callers can drop
+// it in unconditionally. Every call site places this BEFORE the campaign
+// name (not after) — this is the one shared implementation used
+// everywhere a campaign name renders, so fixing it here fixes it
+// everywhere at once.
 export function LiveIndicator({ status, campaign, className = "" }) {
   const live = campaign ? isCampaignLive(campaign) : isLiveStatus(status);
   if (!live) return null;
-  return (
-    <span className={`live-indicator ${className}`} title="Currently live on Meta">
-      <span className="live-dot" />
-      LIVE
-    </span>
-  );
+  return <span className={`live-dot shrink-0 ${className}`} title="Currently live on Meta" />;
 }
 
 // Standardized ROAS display: > 2.4 green with a soft glow, <= 2.4 red —
@@ -71,6 +69,7 @@ export function CampaignNameCell({
   return (
     <div className="min-w-0">
       <div className="flex items-center gap-2 min-w-0">
+        <LiveIndicator status={status} campaign={campaign} />
         <CampaignLink
           tokenId={tokenId}
           campaignId={campaignId}
@@ -81,7 +80,6 @@ export function CampaignNameCell({
           until={until}
           className="campaign-name !text-slate-800 truncate max-w-[260px]"
         />
-        <LiveIndicator status={status} campaign={campaign} />
       </div>
       {showId && campaignId && <div className="campaign-id mt-0.5 truncate">{campaignId}</div>}
     </div>

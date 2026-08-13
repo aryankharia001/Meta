@@ -1,6 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, CheckCheck, Trash2, RefreshCw, Package, AlertTriangle, Download } from "lucide-react";
+import {
+  Bell,
+  CheckCheck,
+  Trash2,
+  RefreshCw,
+  Package,
+  AlertTriangle,
+  Download,
+  CreditCard,
+  Wallet,
+  PackageCheck,
+  RotateCcw,
+  Ban,
+  Truck,
+  Megaphone,
+} from "lucide-react";
 import { useLiveSync } from "../lib/LiveSyncContext";
 import { usePreferences } from "../lib/PreferencesContext";
 import { useNotifications } from "../lib/NotificationsContext";
@@ -29,15 +44,64 @@ import { useNotifications } from "../lib/NotificationsContext";
 // rendering the panel through a portal straight onto document.body
 // with fixed positioning computed from the bell button's own bounding
 // rect, so it's no longer a descendant of any overflow/width-
-// constrained ancestor and can't be clipped by one.
+// constrained ancestor and can't be clipped by one. Re-verified as
+// part of Phase 14 §5 — still correct, no changes needed here.
+//
+// Phase 14 §4 — richer notification types. "new-orders" is kept as a
+// legacy alias (harmless if anything still reads it from localStorage
+// history); new order events now fire as "prepaid-order" / "cod-order"
+// with a full order payload in `meta` so the panel can render an
+// order-shaped card (Order ID / Customer / Amount / Campaign /
+// Payment / Status) instead of one aggregated line. "sync-failed" is
+// split out from generic "error" so a failed sync reads clearly.
+// "order-delivered" / "order-rto" / "order-cancelled" /
+// "logistics-status" / "campaign-activity" are wired up as renderable
+// types for forward-compatibility — see the honest gap note in the
+// final phase summary re: why the live-sync layer can't yet detect
+// status *changes* on already-synced orders without touching the
+// prohibited sync/matching logic.
 // ────────────────────────────────────────────────────────────────
 
 const TYPE_META = {
-  sync: { icon: RefreshCw, accent: "text-sky-500" },
-  "new-orders": { icon: Package, accent: "text-emerald-500" },
-  error: { icon: AlertTriangle, accent: "text-rose-500" },
-  export: { icon: Download, accent: "text-violet-500" },
+  sync: { icon: RefreshCw, accent: "text-sky-500", label: "Sync Completed" },
+  "sync-failed": { icon: AlertTriangle, accent: "text-rose-500", label: "Sync Failed" },
+  "new-orders": { icon: Package, accent: "text-emerald-500", label: "New Order" },
+  "prepaid-order": { icon: CreditCard, accent: "text-sky-600", label: "New Order" },
+  "cod-order": { icon: Wallet, accent: "text-amber-600", label: "New Order" },
+  "order-delivered": { icon: PackageCheck, accent: "text-emerald-600", label: "Order Delivered" },
+  "order-rto": { icon: RotateCcw, accent: "text-amber-600", label: "Order RTO" },
+  "order-cancelled": { icon: Ban, accent: "text-rose-500", label: "Order Cancelled" },
+  "logistics-status": { icon: Truck, accent: "text-sky-500", label: "Logistics Update" },
+  "campaign-activity": { icon: Megaphone, accent: "text-indigo-500", label: "Campaign Activity" },
+  error: { icon: AlertTriangle, accent: "text-rose-500", label: "Error" },
+  export: { icon: Download, accent: "text-violet-500", label: "Export Ready" },
 };
+
+function formatCurrency(amount) {
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return null;
+  return `₹${n.toLocaleString("en-IN")}`;
+}
+
+function paymentLabel(paymentType) {
+  if (paymentType === "PREPAID") return "Prepaid";
+  if (paymentType === "CASH_ON_DELIVERY") return "COD";
+  return null;
+}
+
+// Builds the plain-text fallback (used for the toast-era `message`
+// field / anywhere the raw string is read) from an enriched order
+// record — kept in sync with the rich card rendered below.
+function buildOrderMessage(order) {
+  const parts = [`Order #${order.orderId}`];
+  const pay = paymentLabel(order.paymentType);
+  const amt = formatCurrency(order.totalAmountPayable);
+  if (pay && amt) parts.push(`${pay} · ${amt}`);
+  else if (amt) parts.push(amt);
+  if (order.campaignName) parts.push(`Campaign: ${order.campaignName}`);
+  if (order.deliveryStatus) parts.push(order.deliveryStatus);
+  return parts.join(" — ");
+}
 
 function timeAgo(iso) {
   if (!iso) return "";
@@ -65,15 +129,27 @@ export default function NotificationBell() {
 
   // New orders (background or manual) — piggybacks on the same
   // liveSync.notification the old toast used, so the "what counts as a
-  // new-order event" logic isn't duplicated.
+  // new-order event" logic isn't duplicated (that decision — did new
+  // orders land this cycle — still lives entirely in LiveSyncContext,
+  // untouched). We only read the already-computed newOrderRecords off
+  // liveSync.lastResult (set in the same state batch as `notification`)
+  // to turn one aggregated event into one rich card per order.
   useEffect(() => {
     if (!liveSync.notification) return;
     if (liveSync.notification.id === lastNotifIdRef.current) return;
     lastNotifIdRef.current = liveSync.notification.id;
-    if (prefs.notifyOnNewOrders) {
+    if (!prefs.notifyOnNewOrders) return;
+
+    const records = liveSync.lastResult?.newOrderRecords || [];
+    if (records.length === 0) {
       addNotification("new-orders", liveSync.notification.message);
+      return;
     }
-  }, [liveSync.notification, prefs.notifyOnNewOrders, addNotification]);
+    records.forEach((order) => {
+      const type = order.paymentType === "PREPAID" ? "prepaid-order" : order.paymentType === "CASH_ON_DELIVERY" ? "cod-order" : "new-orders";
+      addNotification(type, buildOrderMessage(order), order);
+    });
+  }, [liveSync.notification, liveSync.lastResult, prefs.notifyOnNewOrders, addNotification]);
 
   // Errors — only fire once per distinct error message, not once per
   // failed 10s poll tick.
@@ -96,8 +172,15 @@ export default function NotificationBell() {
     if (liveSync.manualCompletion.id === lastManualIdRef.current) return;
     lastManualIdRef.current = liveSync.manualCompletion.id;
     if (prefs.notifyOnSync) {
-      const { newOrders } = liveSync.manualCompletion;
-      addNotification("sync", newOrders > 0 ? `Sync completed — ${newOrders} new order${newOrders > 1 ? "s" : ""}` : "Sync completed — no new orders");
+      const { newOrders, failedOrders } = liveSync.manualCompletion;
+      // Phase 14 §4/§6 — "Sync failed" gets its own notification type
+      // instead of folding into generic "Sync completed", using the
+      // failedOrders count LiveSyncContext already exposes (untouched).
+      if (failedOrders > 0) {
+        addNotification("sync-failed", "Sync failed — see Sync page for details");
+      } else {
+        addNotification("sync", newOrders > 0 ? `Sync completed — ${newOrders} new order${newOrders > 1 ? "s" : ""}` : "Sync completed — no new orders");
+      }
     }
   }, [liveSync.manualCompletion, prefs.notifyOnSync, addNotification]);
 
@@ -161,17 +244,40 @@ export default function NotificationBell() {
               <div className="px-3.5 py-8 text-center text-xs text-slate-400">No notifications yet.</div>
             ) : (
               notifications.map((n) => {
-                const meta = TYPE_META[n.type] || TYPE_META.sync;
-                const Icon = meta.icon;
+                const typeMeta = TYPE_META[n.type] || TYPE_META.sync;
+                const Icon = typeMeta.icon;
+                const order = n.meta?.orderId ? n.meta : null;
+                const pay = order ? paymentLabel(order.paymentType) : null;
+                const amt = order ? formatCurrency(order.totalAmountPayable) : null;
                 return (
                   <div
                     key={n.id}
                     className={`flex items-start gap-2.5 px-3.5 py-2.5 hover:bg-slate-50 cursor-pointer ${!n.read ? "bg-blue-50/50" : ""}`}
                     onClick={() => markRead(n.id)}
                   >
-                    <Icon size={13} className={`shrink-0 mt-0.5 ${meta.accent}`} />
+                    <Icon size={13} className={`shrink-0 mt-0.5 ${typeMeta.accent}`} />
                     <div className="min-w-0 flex-1">
-                      <div className="text-xs text-slate-700 leading-snug">{n.message}</div>
+                      {order ? (
+                        // Phase 14 §4 — rich order notification card, per
+                        // spec example format: title / Order # / Payment ·
+                        // Amount / Campaign / Delivery status.
+                        <div className="space-y-0.5">
+                          <div className="text-[11px] font-semibold text-slate-800 leading-snug">{typeMeta.label}</div>
+                          <div className="text-xs text-slate-700 leading-snug font-mono">Order #{order.orderId}</div>
+                          {(pay || amt) && (
+                            <div className="text-[11px] text-slate-500 leading-snug">
+                              {pay || "—"}
+                              {amt ? ` · ${amt}` : ""}
+                            </div>
+                          )}
+                          {order.campaignName && <div className="text-[11px] text-slate-500 leading-snug">Campaign: {order.campaignName}</div>}
+                          {order.customerName && <div className="text-[11px] text-slate-400 leading-snug">{order.customerName}</div>}
+                          {order.orderStatus && <div className="text-[11px] text-slate-500 leading-snug">Order: {order.orderStatus}</div>}
+                          {order.deliveryStatus && <div className="text-[11px] text-slate-500 leading-snug">{order.deliveryStatus}</div>}
+                        </div>
+                      ) : (
+                        <div className="text-xs text-slate-700 leading-snug">{n.message}</div>
+                      )}
                       <div className="text-[10px] text-slate-400 mt-0.5">{timeAgo(n.createdAt)}</div>
                     </div>
                     {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0 mt-1" />}

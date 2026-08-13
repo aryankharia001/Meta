@@ -80,11 +80,21 @@ export default function ComparisonPanel({ campaigns, onClose }) {
 
         <div className="flex-1 overflow-auto p-5">
           <table className="table">
-            <thead className="sticky top-0 z-[1] bg-white">
+            {/* Phase 14 §12 — same fix as ExplorerTable.jsx/
+                LiveMonitoringSection.jsx: <thead> no longer declares its
+                own `sticky top-0` — each <th> declares it individually
+                instead. A table-header-group that's independently sticky
+                on the same axis as its own doubly-sticky corner cell
+                (here, "Metric", which is sticky both top AND left) is a
+                known trigger for browsers to miscompute that cell's
+                horizontal offset, which is what let the "Metric" header
+                scroll away horizontally while its body column stayed
+                pinned. */}
+            <thead className="bg-white">
               <tr>
-                <th className="sticky left-0 bg-white z-[2]">Metric</th>
+                <th className="sticky top-0 left-0 bg-white z-[2]">Metric</th>
                 {campaigns.map((c) => (
-                  <th key={c.campaignId} className="min-w-[160px]">
+                  <th key={c.campaignId} className="sticky top-0 bg-white z-[1] min-w-[160px]">
                     {c.campaignName}
                   </th>
                 ))}
