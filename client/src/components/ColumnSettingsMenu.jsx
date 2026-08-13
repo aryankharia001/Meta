@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { Columns3, GripVertical, Eye, EyeOff, RotateCcw, Check } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────
@@ -17,39 +16,21 @@ import { Columns3, GripVertical, Eye, EyeOff, RotateCcw, Check } from "lucide-re
 // and an optional `group` for a grouped-by-section menu (Campaign
 // Explorer's ~35 columns use this; simpler tables just omit it).
 //
-// Several call sites (CampaignDrawer, KpiAnalyticsPopup, Dashboard's
-// table cards, etc.) put this button inside a `card ... overflow-hidden`
-// or `overflow-auto` wrapper around the table below it — the same
-// clipping bug NotificationBell.jsx hit and fixed in Phase 10: an
-// absolutely-positioned dropdown is still clipped by any ANCESTOR
-// with overflow != visible, so the panel was getting cut off at the
-// card's edge instead of floating over the table. Fixed the same way:
-// render the panel through a portal onto document.body with fixed
-// positioning computed from the button's own bounding rect, so it's
-// never a descendant of a scroll/clip container.
+// Kept deliberately simple: the panel is a plain `absolute` element
+// inside the same `relative` wrapper as the button (no portal, no
+// fixed positioning, no scroll/resize listeners). It opens directly
+// under the button and scrolls naturally with the page since it's a
+// normal descendant in the document flow — nothing to "chase" or close
+// on scroll.
 // ────────────────────────────────────────────────────────────────
 
 export default function ColumnSettingsMenu({ columns, hidden, toggleHidden, reorder, reset, label = "Columns", align = "right" }) {
   const [open, setOpen] = useState(false);
   const [dragKey, setDragKey] = useState(null);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
   const ref = useRef(null);
   const panelRef = useRef(null);
 
-  const PANEL_WIDTH = 288; // w-72
-
-  const updatePosition = () => {
-    if (!ref.current) return;
-    const rect = ref.current.getBoundingClientRect();
-    let left = align === "right" ? rect.right - PANEL_WIDTH : rect.left;
-    left = Math.max(8, Math.min(left, window.innerWidth - PANEL_WIDTH - 8));
-    setPos({ top: rect.bottom + 4, left });
-  };
-
-  const toggleOpen = () => {
-    if (!open) updatePosition();
-    setOpen((o) => !o);
-  };
+  const toggleOpen = () => setOpen((o) => !o);
 
   useEffect(() => {
     if (!open) return;
@@ -60,14 +41,6 @@ export default function ColumnSettingsMenu({ columns, hidden, toggleHidden, reor
     };
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    return () => window.removeEventListener("resize", updatePosition);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const grouped = columns.some((c) => c.group);
@@ -110,31 +83,27 @@ export default function ColumnSettingsMenu({ columns, hidden, toggleHidden, reor
     );
   };
 
-  const panel = open
-    ? createPortal(
-        <div
-          ref={panelRef}
-          style={{ top: pos.top, left: pos.left }}
-          className="fixed w-72 bg-white border border-slate-200 rounded-lg shadow-lg z-[9999] py-1.5 max-h-96 overflow-y-auto"
-        >
-          <p className="px-3 pb-1.5 text-[10px] text-slate-400">Drag to reorder · click the eye to show/hide.</p>
-          {groups.map((g) => (
-            <div key={g.group || "flat"} className="mb-1">
-              {g.group && (
-                <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">{g.group}</div>
-              )}
-              {g.items.map(row)}
-            </div>
-          ))}
-          <div className="px-3 pt-1.5 mt-1 border-t border-slate-100">
-            <button type="button" className="btn btn-secondary btn-sm w-full !justify-center" onClick={reset}>
-              <RotateCcw size={12} /> Reset Columns
-            </button>
-          </div>
-        </div>,
-        document.body
-      )
-    : null;
+  const panel = open ? (
+    <div
+      ref={panelRef}
+      className={`absolute top-full mt-1 ${align === "right" ? "right-0" : "left-0"} w-72 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-1.5 max-h-96 overflow-y-auto`}
+    >
+      <p className="px-3 pb-1.5 text-[10px] text-slate-400">Drag to reorder · click the eye to show/hide.</p>
+      {groups.map((g) => (
+        <div key={g.group || "flat"} className="mb-1">
+          {g.group && (
+            <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">{g.group}</div>
+          )}
+          {g.items.map(row)}
+        </div>
+      ))}
+      <div className="px-3 pt-1.5 mt-1 border-t border-slate-100">
+        <button type="button" className="btn btn-secondary btn-sm w-full !justify-center" onClick={reset}>
+          <RotateCcw size={12} /> Reset Columns
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="relative" ref={ref}>

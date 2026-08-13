@@ -240,17 +240,17 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
 
       <div className="card p-0 overflow-auto max-h-[70vh]">
         <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
-          <thead className="sticky top-0 z-[3]">
+          <thead className="sticky top-0 z-20">
             <tr>
-              <th className="sticky left-0 z-[4] bg-slate-50 !w-11" style={{ width: 44 }}>
+              <th className="sticky left-0 z-30 bg-slate-50 !w-11" style={{ width: 44 }}>
                 <input type="checkbox" checked={allOnPageSelected} onChange={() => onToggleSelectAll(paged.map((c) => c.campaignId))} />
               </th>
-              <th className="sticky z-[4] bg-slate-50" style={{ left: 44, width: 32 }} />
+              <th className="sticky z-30 bg-slate-50" style={{ left: 44, width: 32 }} />
               {visibleColumns.map((c) => (
                 <th
                   key={c.key}
                   className={`relative select-none cursor-pointer ${c.align === "right" ? "num" : c.align === "center" ? "center" : ""} ${
-                    pinnedCols.has(c.key) ? "sticky z-[4] bg-slate-50 shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""
+                    pinnedCols.has(c.key) ? "sticky z-30 bg-slate-50 shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : ""
                   }`}
                   style={{ width: widths[c.key] || c.defaultWidth, left: pinnedCols.has(c.key) ? pinnedLeftOffsets[c.key] : undefined }}
                   onClick={() => handleSort(c.key)}
@@ -276,18 +276,29 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
                 return (
                   <Fragment key={c.campaignId}>
                     <tr className="cursor-pointer hover:bg-slate-50/70" onClick={() => onOpenCampaign(c)}>
-                      <td className="sticky left-0 z-[1] bg-white" onClick={(e) => e.stopPropagation()}>
+                      <td className="sticky left-0 z-10 bg-white" style={{ width: 44 }} onClick={(e) => e.stopPropagation()}>
                         <input type="checkbox" checked={selectedIds.has(c.campaignId)} onChange={() => onToggleSelect(c.campaignId)} />
                       </td>
-                      <td className="sticky z-[1] bg-white" style={{ left: 44 }} onClick={(e) => e.stopPropagation()}>
+                      <td className="sticky z-10 bg-white" style={{ left: 44, width: 32 }} onClick={(e) => e.stopPropagation()}>
                         <button type="button" className="text-slate-400 hover:text-slate-600" onClick={() => toggleExpand(c.campaignId)}>
                           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         </button>
                       </td>
                       {visibleColumns.map((col) => {
                         const alignClass = col.align === "right" ? "num" : col.align === "center" ? "center" : "";
-                        const pinClass = pinnedCols.has(col.key) ? "sticky z-[1] bg-white shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : "";
-                        const style = { left: pinnedCols.has(col.key) ? pinnedLeftOffsets[col.key] : undefined };
+                        const pinClass = pinnedCols.has(col.key) ? "sticky z-10 bg-white shadow-[2px_0_0_0_rgba(0,0,0,0.04)]" : "";
+                        // Explicit width on every body cell (not just pinned
+                        // ones) — previously only the <th> had a width, so
+                        // a long campaign name could grow the <td> wider
+                        // than its header, both overflowing the intended
+                        // column width and desyncing the pinned cell's box
+                        // from its header counterpart (the visual cause of
+                        // the header appearing to sit "behind" the column
+                        // while scrolling).
+                        const style = {
+                          left: pinnedCols.has(col.key) ? pinnedLeftOffsets[col.key] : undefined,
+                          width: widths[col.key] || col.defaultWidth,
+                        };
 
                         if (col.key === "campaignName") {
                           return (
