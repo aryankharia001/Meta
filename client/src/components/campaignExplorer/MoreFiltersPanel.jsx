@@ -106,7 +106,11 @@ export default function MoreFiltersPanel({ filters, onChange, options, onClose, 
         <NumField label="Minimum Orders" value={filters.minOrders} onChange={(v) => set("minOrders", v)} />
         <NumField label="Minimum ROAS" value={filters.minRoas} onChange={(v) => set("minRoas", v)} step="0.1" />
         <NumField label="Minimum Spend" value={filters.minSpend} onChange={(v) => set("minSpend", v)} />
-        <NumField label="Minimum Profit" value={filters.minProfit} onChange={(v) => set("minProfit", v)} />
+        {/* Phase 19 §4 — relabeled "Minimum Profit" → "Minimum Gross Profit"
+            for the same reason as every other "Profit" label in Campaign
+            Explorer: this filters on c.profit (Revenue − Ad Spend only),
+            not Profitability's real Net Profit. Filter logic untouched. */}
+        <NumField label="Minimum Gross Profit" value={filters.minProfit} onChange={(v) => set("minProfit", v)} />
         <NumField label="Min. Delivered Orders" value={filters.minDelivered} onChange={(v) => set("minDelivered", v)} />
         <NumField label="Min. Pending Orders" value={filters.minPending} onChange={(v) => set("minPending", v)} />
         <NumField label="Min. Cancelled Orders" value={filters.minCancelled} onChange={(v) => set("minCancelled", v)} />

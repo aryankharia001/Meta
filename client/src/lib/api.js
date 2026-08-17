@@ -721,3 +721,15 @@ export async function fetchProfitProducts(tokenId, { accountIds, since, until })
   const { data } = await api.get(`/profitability/${tokenId}/products?${params}`);
   return data; // { success, products }
 }
+
+// Phase 18 §3 — per-order detail behind one Expenses-card figure (Product
+// Cost / Packaging / Shipping / Other / Unmapped), for the Profitability
+// Overview tab's expense drill-down popups. Read-only, capped server-side.
+export async function fetchProfitExpenseOrders(tokenId, { accountIds, since, until, type }) {
+  const params = accountParams(accountIds);
+  params.append("since", since);
+  params.append("until", until ?? since);
+  if (type) params.append("type", type);
+  const { data } = await api.get(`/profitability/${tokenId}/expense-orders?${params}`);
+  return data; // { success, since, until, type, count, cappedAt, orders }
+}

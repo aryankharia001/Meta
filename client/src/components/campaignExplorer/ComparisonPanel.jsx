@@ -11,7 +11,11 @@ const METRICS = [
   { key: "budget", label: "Budget", format: (v, c) => formatBudget(c?.budget, c?.budgetType) || "N/A" },
   { key: "spend", label: "Spend", format: currency },
   { key: "revenue", label: "Revenue", format: currency },
-  { key: "profit", label: "Profit", format: currency },
+  // Phase 19 §4 — relabeled "Profit" → "Gross Profit" (Revenue − Ad
+  // Spend only, from campaignExplorer.js) to disambiguate from
+  // Profitability's real Net Profit (which also nets out product/
+  // packaging/shipping/operating costs). Label-only change.
+  { key: "profit", label: "Gross Profit", format: currency },
   { key: "roas", label: "ROAS", format: multiplier },
   { key: "totalOrders", label: "Orders", format: number },
   { key: "codOrders", label: "COD Orders", format: number },

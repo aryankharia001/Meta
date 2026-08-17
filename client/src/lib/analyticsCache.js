@@ -15,3 +15,8 @@ export function getCachedAnalyticsOrders(tokenId, since, until) {
 export function setCachedAnalyticsOrders(tokenId, since, until, data) {
   cache.set(keyOf(tokenId, since, until), data);
 }
+
+// Phase 18 (part 2) — exported so the new useSwr hook (lib/useSwr.js) can
+// build the identical string this file uses internally as the page's SWR
+// cache key. Additive only — both functions above are untouched.
+export const analyticsOrdersCacheKey = keyOf;

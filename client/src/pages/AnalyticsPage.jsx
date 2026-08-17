@@ -21,7 +21,9 @@ import { fetchAnalyticsOrders, fetchLiveAdAccounts, fetchLiveCampaigns } from ".
 // Phase 13 §14 — Analytics' new Hourly tab, reusing the same panel every
 // other Hourly integration point uses.
 import HourlyPanel from "../components/hourly/HourlyPanel";
-import { getCachedAnalyticsOrders, setCachedAnalyticsOrders } from "../lib/analyticsCache";
+import { getCachedAnalyticsOrders, setCachedAnalyticsOrders, analyticsOrdersCacheKey } from "../lib/analyticsCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
 import OrdersListPopup from "../components/OrdersListPopup";
@@ -87,6 +89,12 @@ const TABS = [
   { key: "hourly", label: "Hourly", icon: Clock4 },
 ];
 
+// Phase 18 (part 2) — Analytics aggregates a whole order list client-side
+// across 9 tabs; that list doesn't change second-to-second, so a slightly
+// longer stale window than the fast-moving Explorer pages is appropriate
+// (still short enough that "today" ranges feel current between visits).
+const ANALYTICS_STALE_MS = 60000;
+
 export default function AnalyticsPage() {
   const { tokenId: TOKEN_ID, setTokenId, tokens } = useSelectedToken();
   const liveSync = useLiveSync();
@@ -101,11 +109,6 @@ export default function AnalyticsPage() {
     if (presetKey === "custom") return { since: customSince, until: customUntil };
     return PRESETS.find((p) => p.key === presetKey).range();
   }, [presetKey, customSince, customUntil]);
-
-  const [orders, setOrders] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [lastFetchedAt, setLastFetchedAt] = useState(null);
 
   const [campaignData, setCampaignData] = useState(null); // /compare response, for spend/ROAS
 
@@ -174,34 +177,22 @@ export default function AnalyticsPage() {
     };
   }, [TOKEN_ID]);
 
-  // ── Analytics orders (lazy, cached) ───────────────────────────
-  const load = ({ force = false } = {}) => {
-    if (!TOKEN_ID) return;
-    if (!force) {
-      const cached = getCachedAnalyticsOrders(TOKEN_ID, since, until);
-      if (cached) {
-        setOrders(cached.orders);
-        setError("");
-        setLastFetchedAt(new Date());
-        return;
-      }
-    }
-    setLoading(true);
-    setError("");
-    fetchAnalyticsOrders(TOKEN_ID, { since, until })
-      .then((res) => {
-        setOrders(res.orders);
-        setCachedAnalyticsOrders(TOKEN_ID, since, until, res);
-        setLastFetchedAt(new Date());
-      })
-      .catch((err) => setError(err.message || "Failed to load analytics data"))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [TOKEN_ID, since, until]);
+  // ── Analytics orders (Phase 18 part 2 — real SWR) ─────────────
+  const analyticsCacheKey = TOKEN_ID ? analyticsOrdersCacheKey(TOKEN_ID, since, until) : null;
+  const {
+    data: analyticsData,
+    loading,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(analyticsCacheKey, () => fetchAnalyticsOrders(TOKEN_ID, { since, until }), {
+    staleTimeMs: ANALYTICS_STALE_MS,
+    getCached: () => getCachedAnalyticsOrders(TOKEN_ID, since, until),
+    setCached: (d) => setCachedAnalyticsOrders(TOKEN_ID, since, until, d),
+  });
+  const orders = analyticsData?.orders || null;
 
   // Campaign spend/ROAS data — same existing /compare endpoint Dashboard
   // and Campaign Comparison already call, reused as-is for leaderboards.
@@ -228,7 +219,7 @@ export default function AnalyticsPage() {
   // date-filter-awareness rule every other page follows.
   useEffect(() => {
     if (rangeIncludesToday(since, until, todayIso())) {
-      load({ force: true });
+      refresh();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSync.syncVersion]);
@@ -313,15 +304,11 @@ export default function AnalyticsPage() {
             </div>
 
             <div className="flex items-center gap-2.5">
-              {lastFetchedAt && (
-                <span className="text-xs text-slate-400">
-                  Updated {lastFetchedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              )}
+              <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
               <SavedViewsControl page="analytics" getFilters={getAnalyticsFilters} applyFilters={applyAnalyticsFilters} />
-              <button className="btn btn-secondary btn-sm" onClick={() => load({ force: true })} disabled={loading}>
-                <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-                {loading ? "Refreshing…" : "Refresh"}
+              <button className="btn btn-secondary btn-sm" onClick={refresh} disabled={isValidating}>
+                <RefreshCw size={14} className={isValidating ? "animate-spin" : ""} />
+                {isValidating ? "Refreshing…" : "Refresh"}
               </button>
             </div>
           </div>
@@ -417,7 +404,7 @@ export default function AnalyticsPage() {
       </div>
 
       <div className="max-w-[1600px] mx-auto px-6 pt-6">
-        {error && <ErrorState message={error} onRetry={() => load({ force: true })} />}
+        {error && <ErrorState message={error} onRetry={refresh} />}
 
         {!error && loading && !orders && <SectionSkeleton />}
 

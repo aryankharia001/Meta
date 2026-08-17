@@ -13,7 +13,9 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { fetchCampaignExplorer, fetchLiveAdAccounts, fetchCampaignDetails } from "../lib/api";
-import { getCachedExplorerList, setCachedExplorerList } from "../lib/campaignExplorerCache";
+import { getCachedExplorerList, setCachedExplorerList, explorerListCacheKey } from "../lib/campaignExplorerCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
@@ -24,6 +26,12 @@ import ComparisonPanel from "../components/campaignExplorer/ComparisonPanel";
 import MoreFiltersPanel, { DEFAULT_FILTERS, applyExplorerFilters, countActiveFilters } from "../components/campaignExplorer/MoreFiltersPanel";
 import { ALL_COLUMNS } from "../lib/campaignExplorerColumns";
 import { currency, number } from "../lib/format";
+
+// Phase 18 (part 2) — the server's own campaignExplorer.js route caches
+// for 45s (see campaignExplorerCache.js's file banner); matching that
+// here means the client never asks more often than the server would
+// actually return anything new for anyway.
+const EXPLORER_STALE_MS = 45000;
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — Campaign Explorer. The new campaign-first home page,
@@ -111,11 +119,6 @@ export default function CampaignExplorerPage() {
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [lastFetchedAt, setLastFetchedAt] = useState(null);
-
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [comparisonOpen, setComparisonOpen] = useState(false);
   const [copiedIds, setCopiedIds] = useState(false);
@@ -157,41 +160,34 @@ export default function CampaignExplorerPage() {
     };
   }, [TOKEN_ID]);
 
-  // ── Main list fetch ──────────────────────────────────────────
-  const load = ({ force = false } = {}) => {
-    if (!TOKEN_ID || selectedAccounts.length === 0) return;
-    if (!force) {
-      const cached = getCachedExplorerList(TOKEN_ID, selectedAccounts, since, until);
-      if (cached) {
-        setData(cached);
-        setLastFetchedAt(new Date());
-        return;
-      }
-    }
-    setLoading(true);
-    setError("");
-    fetchCampaignExplorer(TOKEN_ID, { accountIds: selectedAccounts, since, until })
-      .then((res) => {
-        setData(res);
-        setCachedExplorerList(TOKEN_ID, selectedAccounts, since, until, res);
-        setLastFetchedAt(new Date());
-      })
-      .catch((err) => setError(err.message || "Failed to load campaigns"))
-      .finally(() => setLoading(false));
-  };
+  // ── Main list fetch (Phase 18 part 2 — real SWR) ────────────────
+  // Cache key is a plain string (see lib/useSwr.js's note on why) built
+  // with the exact same tokenId+sortedAccountIds+since+until convention
+  // campaignExplorerCache.js already used internally.
+  const explorerCacheKey =
+    TOKEN_ID && selectedAccounts.length > 0 ? explorerListCacheKey(TOKEN_ID, selectedAccounts, since, until) : null;
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [TOKEN_ID, selectedAccounts.join(","), since, until]);
+  const {
+    data,
+    loading,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(explorerCacheKey, () => fetchCampaignExplorer(TOKEN_ID, { accountIds: selectedAccounts, since, until }), {
+    staleTimeMs: EXPLORER_STALE_MS,
+    getCached: () => getCachedExplorerList(TOKEN_ID, selectedAccounts, since, until),
+    setCached: (d) => setCachedExplorerList(TOKEN_ID, selectedAccounts, since, until, d),
+  });
 
   // Phase 5-style background refresh: if a live sync tick found new
   // orders and this page's date range includes today, silently re-fetch
-  // (bypassing cache) so the table reflects them without the user
+  // (bypassing staleness) so the table reflects them without the user
   // clicking Refresh — same rangeIncludesToday guard Dashboard uses.
   useEffect(() => {
     if (!rangeIncludesToday(since, until, todayIso())) return;
-    load({ force: true });
+    refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSync.syncVersion]);
 
@@ -316,9 +312,7 @@ export default function CampaignExplorerPage() {
             </div>
           </div>
           <div className="flex items-center gap-2.5">
-            {lastFetchedAt && (
-              <span className="text-xs text-slate-400">Updated {lastFetchedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-            )}
+            <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
             <SavedViewsControl
               page="campaign-explorer"
               getFilters={() => ({ presetKey, customSince, customUntil, selectedAccounts, search })}
@@ -330,8 +324,8 @@ export default function CampaignExplorerPage() {
                 if (f.search !== undefined) setSearch(f.search);
               }}
             />
-            <button className="btn btn-secondary btn-sm" onClick={() => load({ force: true })} disabled={loading}>
-              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> {loading ? "Refreshing…" : "Refresh"}
+            <button className="btn btn-secondary btn-sm" onClick={refresh} disabled={isValidating}>
+              <RefreshCw size={14} className={isValidating ? "animate-spin" : ""} /> {isValidating ? "Refreshing…" : "Refresh"}
             </button>
           </div>
         </div>
@@ -421,7 +415,12 @@ export default function CampaignExplorerPage() {
             <SummaryChip label="Campaigns" value={number(data.summary.totalCampaigns)} />
             <SummaryChip label="Total Spend" value={currency(data.summary.totalSpend)} />
             <SummaryChip label="Total Revenue" value={currency(data.summary.totalRevenue)} />
-            <SummaryChip label="Total Profit" value={currency(data.summary.totalProfit)} />
+            {/* Phase 19 §4 — relabeled "Total Profit" → "Total Gross Profit"
+                (Revenue − Ad Spend only, no product/operating costs) so
+                it's never mistaken for Profitability's real Net Profit —
+                same "one correct calculation" naming-collision fix as
+                Dashboard.jsx. Math (data.summary.totalProfit) untouched. */}
+            <SummaryChip label="Total Gross Profit" value={currency(data.summary.totalProfit)} />
             <SummaryChip label="Avg ROAS" value={`${data.summary.averageROAS.toFixed(2)}x`} />
             <SummaryChip label="Unmatched Orders" value={number(data.summary.unmatchedOrders)} />
           </div>

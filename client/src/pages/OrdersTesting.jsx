@@ -1,12 +1,18 @@
 import { useState } from "react";
+import { RefreshCw } from "lucide-react";
 import axios from "axios";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
+import { getCachedOrdersReport, setCachedOrdersReport, ordersReportCacheKey } from "../lib/ordersTestingCache";
+
+// Phase 18 (part 2) — this endpoint (GET /api/orders/orders) isn't token-
+// or account-scoped, just a date-range report, so a slightly longer
+// stale window than the campaign-scoped explorer pages is reasonable.
+const ORDERS_STALE_MS = 60000;
 
 export default function OrdersTesting() {
   const [since, setSince] = useState("");
   const [until, setUntil] = useState("");
-
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
 
   const [expandedCampaign, setExpandedCampaign] = useState(null);
 
@@ -15,31 +21,30 @@ export default function OrdersTesting() {
     direction: "asc",
   });
 
+  const ordersCacheKey = since && until ? ordersReportCacheKey(since, until) : null;
+  const {
+    data,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(ordersCacheKey, () => axios.get("/api/orders/orders", { params: { since, until } }).then((res) => res.data), {
+    staleTimeMs: ORDERS_STALE_MS,
+    getCached: () => getCachedOrdersReport(since, until),
+    setCached: (d) => setCachedOrdersReport(since, until, d),
+  });
 
-
-  const fetchOrders = async () => {
-    try {
-      setLoading(true);
-
-      const res = await axios.get(
-        "/api/orders/orders",
-        {
-          params: {
-            since,
-            until,
-          },
-        }
-      );
-
-      setData(res.data);
-
-    } catch (err) {
-      console.error(err);
-      alert("Failed to fetch orders");
-
-    } finally {
-      setLoading(false);
-    }
+  // The old "Fetch" button used to be the only way this page ever loaded
+  // anything; now the SWR hook above already fetches (or shows cached
+  // data instantly) as soon as both dates are picked, and this button is
+  // the manual bypass-staleness "get me the latest" action instead.
+  const fetchOrders = () => {
+    if (!since || !until) return;
+    refresh().catch(() => {
+      // useSwr already records this as `error`/`backgroundError` — the
+      // old alert() on failure is replaced by that inline messaging.
+    });
   };
 
 
@@ -171,11 +176,15 @@ export default function OrdersTesting() {
         />
 
 
-        <button className="btn btn-primary" onClick={fetchOrders} disabled={loading}>
-          {loading ? "Loading..." : "Fetch"}
+        <button className="btn btn-primary" onClick={fetchOrders} disabled={isValidating || !since || !until}>
+          <RefreshCw size={14} className={isValidating ? "animate-spin" : ""} /> {isValidating ? "Loading..." : "Fetch"}
         </button>
 
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+
       </div>
+
+      {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 mb-4">{error}</div>}
 
 
 

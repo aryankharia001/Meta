@@ -22,6 +22,13 @@ const productSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     sku: { type: String, trim: true, default: "", index: true },
     variantId: { type: String, trim: true, default: "" },
+    // Phase 18 §1/§2 — Shopify/Shiprocket-style parent "product id",
+    // distinct from `variantId` (a variant is one SKU/size/color under a
+    // product; the product id is shared across all of a product's
+    // variants). Additive field — existing docs default to "" via
+    // Mongoose, no migration needed. Used as the third-priority match
+    // tier in profitability.js (variantId -> sku -> productId -> name).
+    productId: { type: String, trim: true, default: "" },
     productCost: { type: Number, default: 0, min: 0 },
     packagingCost: { type: Number, default: 0, min: 0 },
     shippingCost: { type: Number, default: 0, min: 0 },

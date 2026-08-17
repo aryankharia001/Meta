@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   LayoutDashboard,
   RefreshCw,
@@ -27,6 +27,9 @@ import {
   Pin,
 } from "lucide-react";
 import { fetchLiveAdAccounts, fetchLiveCampaigns } from "../lib/api";
+import { getCachedDashboard, setCachedDashboard, dashboardCacheKey } from "../lib/dashboardCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import CampaignLink from "../components/CampaignLink";
 import { CampaignNameCell, RoasValue, BudgetCell } from "../components/CampaignCells";
@@ -140,7 +143,19 @@ const CARD_DEFS = [
   { key: "revenue", label: "Revenue", icon: Wallet, accent: "emerald", format: currency },
   { key: "spend", label: "Spend", icon: CreditCard, accent: "amber", format: currency },
   { key: "roas", label: "ROAS", icon: Gauge, accent: "violet", format: (v) => `${Number(v || 0).toFixed(2)}x` },
-  { key: "profit", label: "Profit", icon: PiggyBank, accent: "emerald", format: currency },
+  // Phase 19 §4 — relabeled from "Profit" to "Gross Profit" to avoid
+  // colliding with the Profitability page's real, fully-expensed Net
+  // Profit. Label kept as-is (not re-renamed here) since that naming
+  // decision still stands, but the math is no longer just Revenue −
+  // Ad Spend: it now also nets out (a) a COD-risk discount — codSuccessRate,
+  // user-editable via the COD Orders card, default 70%, since not every
+  // COD order actually gets delivered/collected — and (b) editable flat
+  // per-order costs (manufacturing/shipping/packaging/misc) entered via
+  // the dropdown on this card, multiplied by total order count. See the
+  // `profit`/`profitBreakdown` computation in cardValues below and the
+  // ProfitCard component. This is still a dashboard-level *estimate*,
+  // not a replacement for the Profitability page's audited Net Profit.
+  { key: "profit", label: "Gross Profit", icon: PiggyBank, accent: "emerald", format: currency },
   { key: "aov", label: "Avg Order Value", icon: Receipt, accent: "sky", format: currency },
   { key: "prepaid", label: "Prepaid Orders", icon: CreditCard, accent: "indigo", format: number },
   { key: "cod", label: "COD Orders", icon: Truck, accent: "amber", format: number },
@@ -192,11 +207,6 @@ export default function Dashboard() {
     return PRESETS.find((p) => p.key === presetKey).range();
   }, [presetKey, customSince, customUntil]);
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [lastFetchedAt, setLastFetchedAt] = useState(null);
-
   const liveSync = useLiveSync();
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -204,6 +214,47 @@ export default function Dashboard() {
 
   const [expandedCampaign, setExpandedCampaign] = useState(null);
   const [sortConfig, setSortConfig] = useState({ key: "spend", direction: "desc" });
+
+  // ── Profit inputs (new) ──────────────────────────────────────
+  // COD orders show up as "revenue" the moment they're placed, but a
+  // real chunk of them never actually get delivered/collected (RTO,
+  // cancelled in transit, etc.). codSuccessRate is a user-editable
+  // estimate (default 70%) of how much COD revenue is real; it's read
+  // from and written to localStorage so the person's own estimate
+  // persists across visits. It ONLY affects the profit calculation
+  // below — the "Revenue" and "COD Orders" cards themselves keep
+  // showing the literal totals from the API, unchanged.
+  const [codSuccessRate, setCodSuccessRate] = useState(() => {
+    const saved = Number(localStorage.getItem("dashboardCodSuccessRate"));
+    return Number.isFinite(saved) && saved > 0 && saved <= 100 ? saved : 70;
+  });
+  useEffect(() => {
+    localStorage.setItem("dashboardCodSuccessRate", String(codSuccessRate));
+  }, [codSuccessRate]);
+
+  // Per-order cost inputs (manufacturing / shipping / packaging / misc),
+  // also user-editable and persisted. Each is a flat ₹ amount charged
+  // once per order, multiplied by total order count in cardValues below.
+  const [perOrderCosts, setPerOrderCosts] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("dashboardPerOrderCosts"));
+      return {
+        manufacturing: Number(saved?.manufacturing) || 0,
+        shipping: Number(saved?.shipping) || 0,
+        packaging: Number(saved?.packaging) || 0,
+        misc: Number(saved?.misc) || 0,
+      };
+    } catch {
+      return { manufacturing: 0, shipping: 0, packaging: 0, misc: 0 };
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem("dashboardPerOrderCosts", JSON.stringify(perOrderCosts));
+  }, [perOrderCosts]);
+  const updatePerOrderCost = (field, value) => {
+    const v = Number(value);
+    setPerOrderCosts((prev) => ({ ...prev, [field]: Number.isFinite(v) && v >= 0 ? v : 0 }));
+  };
 
   // Phase 7 — Saved Views snapshot/restore. Deliberately a plain object
   // of already-existing state, not a new source of truth — restoring a
@@ -249,46 +300,45 @@ export default function Dashboard() {
     };
   }, [TOKEN_ID]);
 
-  // ── Campaign + order comparison data ────────────────────────
-  const load = useCallback(async () => {
-    if (!TOKEN_ID || selectedAccounts.length === 0) return;
-    setLoading(true);
-    setError("");
-    try {
-      const res = await fetchLiveCampaigns(TOKEN_ID, { accountIds: selectedAccounts, since, until });
-      setData(res);
-      setLastFetchedAt(new Date());
-    } catch (err) {
-      setError(err.message || "Failed to load dashboard data");
-    } finally {
-      setLoading(false);
-    }
-  }, [TOKEN_ID, selectedAccounts, since, until]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  // ── Campaign + order comparison data (Phase 18 part 2 — real SWR) ──
+  // "Today"/live-ish views change fast, so a short stale window — same
+  // 30s Campaign Explorer's Live section effectively polls at.
+  const dashboardKey =
+    TOKEN_ID && selectedAccounts.length > 0 ? dashboardCacheKey(TOKEN_ID, selectedAccounts, since, until) : null;
+  const {
+    data,
+    loading,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(dashboardKey, () => fetchLiveCampaigns(TOKEN_ID, { accountIds: selectedAccounts, since, until }), {
+    staleTimeMs: 30000,
+    getCached: () => getCachedDashboard(TOKEN_ID, selectedAccounts, since, until),
+    setCached: (d) => setCachedDashboard(TOKEN_ID, selectedAccounts, since, until, d),
+  });
 
   // ── Phase 5: silent smart-refresh — when the background 10s live-sync
   // poll finds new orders (liveSync.syncVersion only bumps when it does,
-  // see LiveSyncContext), re-run the existing load() IF the currently
-  // selected date range includes today (new orders are always dated
-  // today — see liveSync.js). Skipped entirely for a past range like
-  // "Yesterday" so today's new orders never leak into that view. The
-  // ref guards against firing on initial mount (load() already covers
-  // that via the effect above).
+  // see LiveSyncContext), force a real refetch (bypassing staleness) IF
+  // the currently selected date range includes today (new orders are
+  // always dated today — see liveSync.js). Skipped entirely for a past
+  // range like "Yesterday" so today's new orders never leak into that
+  // view. The ref guards against firing on initial mount (the SWR hook's
+  // own mount effect already covers that).
   const prevSyncVersionRef = useRef(liveSync.syncVersion);
   useEffect(() => {
     if (liveSync.syncVersion === prevSyncVersionRef.current) return;
     prevSyncVersionRef.current = liveSync.syncVersion;
     if (rangeIncludesToday(since, until, todayIso())) {
-      load();
+      refresh();
     }
-  }, [liveSync.syncVersion, since, until, load]);
+  }, [liveSync.syncVersion, since, until, refresh]);
 
   const handleRefresh = async () => {
     await liveSync.manualRefresh(); // incremental Shiprocket sync (new orders only), guarded against overlap
-    load(); // re-read whatever's now in Mongo via the existing, untouched /compare endpoint
+    refresh(); // re-read whatever's now in Mongo via the existing, untouched /compare endpoint
   };
 
   // ── Derived data ─────────────────────────────────────────────
@@ -309,6 +359,28 @@ export default function Dashboard() {
     const prepaid = allOrders.filter((o) => o.paymentType === "PREPAID").length;
     const cod = allOrders.filter((o) => o.paymentType === "CASH_ON_DELIVERY").length;
 
+    // Revenue attributable to COD orders, at face value (before the
+    // success-rate haircut). The "Revenue" card keeps showing the raw
+    // `revenue` total untouched — this discount only feeds into profit.
+    const codRevenueRaw = allOrders
+      .filter((o) => o.paymentType === "CASH_ON_DELIVERY")
+      .reduce((sum, o) => sum + Number(o.totalAmountPayable || 0), 0);
+    const codRevenueLoss = codRevenueRaw * (1 - codSuccessRate / 100);
+
+    // Flat per-order costs (manufacturing + shipping + packaging + misc),
+    // applied to every order in the range — matched, unmatched, and
+    // regardless of outcome, since manufacturing/shipping/packaging spend
+    // is typically committed as soon as an order ships, not only on
+    // orders that end up delivered.
+    const perOrderCostTotal =
+      (Number(perOrderCosts.manufacturing) || 0) +
+      (Number(perOrderCosts.shipping) || 0) +
+      (Number(perOrderCosts.packaging) || 0) +
+      (Number(perOrderCosts.misc) || 0);
+    const totalPerOrderCosts = perOrderCostTotal * totalOrders;
+
+    const profit = revenue - codRevenueLoss - spend - totalPerOrderCosts;
+
     return {
       totalOrders,
       matchedOrders,
@@ -316,13 +388,21 @@ export default function Dashboard() {
       revenue,
       spend,
       roas,
-      profit: revenue - spend,
+      profit,
+      profitBreakdown: {
+        revenue,
+        codRevenueLoss,
+        spend,
+        perOrderCostTotal,
+        totalPerOrderCosts,
+        totalOrders,
+      },
       aov: totalOrders ? revenue / totalOrders : 0,
       prepaid,
       cod,
       activeCampaigns: data.summary.totalCampaigns || 0,
     };
-  }, [data, allOrders]);
+  }, [data, allOrders, codSuccessRate, perOrderCosts]);
 
   const cardList = useMemo(
     () =>
@@ -421,17 +501,18 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center gap-2.5">
+              <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
               <DataFreshnessBadge />
               <SyncStatusIndicator />
               <SavedViewsControl page="dashboard" getFilters={getDashboardFilters} applyFilters={applyDashboardFilters} />
               <button
                 className="btn btn-secondary btn-sm"
                 onClick={handleRefresh}
-                disabled={loading || liveSync.isSyncing}
+                disabled={isValidating || liveSync.isSyncing}
                 title={liveSync.isSyncing ? "Sync already in progress." : "Refresh Now"}
               >
-                <RefreshCw size={14} className={loading || liveSync.isSyncing ? "animate-spin" : ""} />
-                {loading || liveSync.isSyncing ? "Refreshing…" : "Refresh Now"}
+                <RefreshCw size={14} className={isValidating || liveSync.isSyncing ? "animate-spin" : ""} />
+                {isValidating || liveSync.isSyncing ? "Refreshing…" : "Refresh Now"}
               </button>
             </div>
           </div>
@@ -512,14 +593,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            <div className="ml-auto text-xs text-slate-400">
-              {lastFetchedAt ? (
-                <>
-                  Updated {lastFetchedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ·{" "}
-                </>
-              ) : null}
-              {since === until ? since : `${since} → ${until}`}
-            </div>
+            <div className="ml-auto text-xs text-slate-400">{since === until ? since : `${since} → ${until}`}</div>
           </div>
         </div>
       </div>
@@ -527,7 +601,7 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto px-6 pt-6">
         <RecentlyViewedWidget />
 
-        {error && <ErrorState message={error} onRetry={load} />}
+        {error && <ErrorState message={error} onRetry={refresh} />}
 
         {!error && loading && !data && <SkeletonGrid />}
 
@@ -552,18 +626,43 @@ export default function Dashboard() {
             </div>
             <div
               className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-8 transition-opacity ${
-                loading && data ? "opacity-60 pointer-events-none" : ""
+                isValidating && data ? "opacity-60 pointer-events-none" : ""
               }`}
             >
-              {visibleCardList.map(({ key: cardKey, ...c }) => (
-                <KpiCard
-                  key={cardKey}
-                  {...c}
-                  pinned={dashboardLayout.layout.pinned.includes(cardKey)}
-                  wide={(dashboardLayout.layout.wide || []).includes(cardKey)}
-                  onClick={() => data && setActivePopupCard({ key: cardKey, ...c })}
-                />
-              ))}
+              {visibleCardList.map(({ key: cardKey, ...c }) => {
+                const pinned = dashboardLayout.layout.pinned.includes(cardKey);
+                const wide = (dashboardLayout.layout.wide || []).includes(cardKey);
+                const onClick = () => data && setActivePopupCard({ key: cardKey, ...c });
+
+                if (cardKey === "cod") {
+                  return (
+                    <CodOrdersCard
+                      key={cardKey}
+                      {...c}
+                      pinned={pinned}
+                      wide={wide}
+                      codSuccessRate={codSuccessRate}
+                      onCodSuccessRateChange={setCodSuccessRate}
+                      onClick={onClick}
+                    />
+                  );
+                }
+                if (cardKey === "profit") {
+                  return (
+                    <ProfitCard
+                      key={cardKey}
+                      {...c}
+                      pinned={pinned}
+                      wide={wide}
+                      perOrderCosts={perOrderCosts}
+                      onCostChange={updatePerOrderCost}
+                      breakdown={cardValues.profitBreakdown}
+                      onClick={onClick}
+                    />
+                  );
+                }
+                return <KpiCard key={cardKey} {...c} pinned={pinned} wide={wide} onClick={onClick} />;
+              })}
               {visibleCardList.length === 0 && (
                 <div className="col-span-full text-center py-8 text-sm text-slate-400 border border-dashed border-slate-200 rounded-xl">
                   All KPI cards are hidden. Click Customize to bring some back.
@@ -585,7 +684,7 @@ export default function Dashboard() {
         {!error && data && hasSearchButNoMatches && <NoSearchResults query={searchQuery} onClear={() => setSearchQuery("")} />}
 
         {!error && data && !isEmpty && (
-          <div className={`space-y-8 transition-opacity ${loading ? "opacity-60 pointer-events-none" : ""}`}>
+          <div className={`space-y-8 transition-opacity ${isValidating ? "opacity-60 pointer-events-none" : ""}`}>
             <section className="card p-0 overflow-hidden">
               <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 gap-3 flex-wrap">
                 <h2 className="font-display font-semibold text-slate-800 text-sm">
@@ -857,6 +956,130 @@ function KpiCard({ label, icon: Icon, accent, display, pinned, wide, onClick }) 
   );
 }
 
+// COD Orders card — adds an inline, editable "success rate" field.
+// Clicking the icon/label still opens the usual analytics popup; the
+// success-rate row is stopPropagation'd so typing in it never triggers
+// that click.
+function CodOrdersCard({ label, icon: Icon, accent, display, pinned, wide, codSuccessRate, onCodSuccessRateChange, onClick }) {
+  return (
+    <div
+      className={`group relative card !p-4 flex flex-col gap-2.5 ${pinned ? "!border-amber-300" : ""} ${
+        wide ? "col-span-2" : ""
+      }`}
+    >
+      {pinned && <Pin size={11} className="absolute top-3 right-3 text-amber-400" fill="currentColor" />}
+      <button type="button" onClick={onClick} className="flex flex-col gap-3 text-left" title="View detailed analytics">
+        <span className={`flex items-center justify-center w-9 h-9 rounded-xl ${ACCENTS[accent]}`}>
+          <Icon size={17} />
+        </span>
+        <div className="min-w-0">
+          <div className="text-[13px] text-slate-500 mb-0.5 leading-tight truncate">{label}</div>
+          <div className="text-xl font-display font-bold text-slate-800 truncate">{display ?? "—"}</div>
+        </div>
+      </button>
+
+      <div
+        className="flex items-center justify-between gap-2 pt-2 mt-0.5 border-t border-slate-100"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <label className="text-[11px] text-slate-400 shrink-0" title="Estimated % of COD orders that actually get delivered/collected">
+          Success rate
+        </label>
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={codSuccessRate}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              onCodSuccessRateChange(Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0);
+            }}
+            className="w-14 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-right focus:outline-none focus:ring-1 focus:ring-indigo-400"
+          />
+          <span className="text-[11px] text-slate-400">%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Gross Profit card — adds a collapsible "dropdown" of editable
+// per-order cost inputs (manufacturing / shipping / packaging / misc)
+// plus a short breakdown of what got deducted. The chevron toggles the
+// panel open/closed without triggering the analytics popup.
+function ProfitCard({ label, icon: Icon, accent, display, pinned, wide, perOrderCosts, onCostChange, breakdown, onClick }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div
+      className={`group relative card !p-4 flex flex-col gap-3 ${pinned ? "!border-amber-300" : ""} ${
+        wide ? "col-span-2" : ""
+      }`}
+    >
+      {pinned && <Pin size={11} className="absolute top-3 right-3 text-amber-400" fill="currentColor" />}
+
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={onClick} title="View detailed analytics">
+          <span className={`flex items-center justify-center w-9 h-9 rounded-xl ${ACCENTS[accent]}`}>
+            <Icon size={17} />
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="text-slate-400 hover:text-slate-600 p-0.5 -m-0.5"
+          title="Set per-order costs"
+        >
+          <ChevronDown size={15} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </div>
+
+      <button type="button" onClick={onClick} className="min-w-0 text-left" title="View detailed analytics">
+        <div className="text-[13px] text-slate-500 mb-0.5 leading-tight truncate">{label}</div>
+        <div className="text-xl font-display font-bold text-slate-800 truncate">{display ?? "—"}</div>
+      </button>
+
+      {open && (
+        <div className="pt-2.5 mt-0.5 border-t border-slate-100 space-y-2" onClick={(e) => e.stopPropagation()}>
+          <CostInput label="Manufacturing / order" value={perOrderCosts.manufacturing} onChange={(v) => onCostChange("manufacturing", v)} />
+          <CostInput label="Shipping / order" value={perOrderCosts.shipping} onChange={(v) => onCostChange("shipping", v)} />
+          <CostInput label="Packaging / order" value={perOrderCosts.packaging} onChange={(v) => onCostChange("packaging", v)} />
+          <CostInput label="Misc / order" value={perOrderCosts.misc} onChange={(v) => onCostChange("misc", v)} />
+
+          {breakdown && (
+            <div className="text-[11px] text-slate-400 pt-1.5 mt-0.5 border-t border-slate-100 leading-relaxed">
+              Revenue {currency(breakdown.revenue)} − COD loss {currency(breakdown.codRevenueLoss)} − Spend{" "}
+              {currency(breakdown.spend)} − Costs {currency(breakdown.totalPerOrderCosts)} ({breakdown.totalOrders} orders ×{" "}
+              {currency(breakdown.perOrderCostTotal)})
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CostInput({ label, value, onChange }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <label className="text-[11px] text-slate-400">{label}</label>
+      <div className="flex items-center gap-1">
+        <span className="text-[11px] text-slate-400">₹</span>
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-16 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-right focus:outline-none focus:ring-1 focus:ring-indigo-400"
+        />
+      </div>
+    </div>
+  );
+}
+
 function SkeletonGrid() {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
@@ -962,4 +1185,3 @@ function AccountsPicker({ accounts, selected, loading, onToggle, onSelectAll, on
     </div>
   );
 }
-

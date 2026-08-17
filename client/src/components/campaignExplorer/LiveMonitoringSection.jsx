@@ -164,7 +164,11 @@ export default function LiveMonitoringSection({ tokenId, accountIds, onOpenCampa
             <KpiChip icon={Wallet} label="Revenue Today" value={currency(liveData.summary.revenueToday)} accent="bg-sky-50 text-sky-600" />
             <KpiChip icon={Package} label="Orders Today" value={number(liveData.summary.ordersToday)} accent="bg-indigo-50 text-indigo-600" />
             <KpiChip icon={Gauge} label="ROAS Today" value={multiplier(liveData.summary.roasToday)} accent="bg-violet-50 text-violet-600" />
-            <KpiChip icon={PiggyBank} label="Profit Today" value={currency(liveData.summary.profitToday)} accent="bg-emerald-50 text-emerald-600" />
+            {/* Phase 19 §4 — relabeled "Profit Today" → "Gross Profit Today"
+                (Revenue − Ad Spend only) — same naming-collision fix as
+                every other "Profit" label in this Explorer, disambiguating
+                from Profitability's real Net Profit. Value untouched. */}
+            <KpiChip icon={PiggyBank} label="Gross Profit Today" value={currency(liveData.summary.profitToday)} accent="bg-emerald-50 text-emerald-600" />
             <KpiChip icon={Building2} label="Active Ad Accounts" value={number(liveData.summary.activeAdAccounts)} accent="bg-slate-100 text-slate-500" />
           </div>
 

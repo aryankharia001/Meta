@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import axios from "axios";
 import { fetchLiveAdAccounts } from "../lib/api";
 import { useSelectedToken } from "../lib/useSelectedToken";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
+import { getCachedCampaignReport, setCachedCampaignReport, campaignReportCacheKey } from "../lib/campaignTestingCache";
+
+// Phase 18 (part 2) — same "fast-moving campaign data" reasoning as
+// Campaign Explorer's own stale time.
+const CAMPAIGN_REPORT_STALE_MS = 45000;
 
 export default function CampaignTesting() {
   const { tokenId: TOKEN_ID, setTokenId, tokens } = useSelectedToken();
@@ -13,11 +21,6 @@ export default function CampaignTesting() {
 
   const [since, setSince] = useState(today);
   const [until, setUntil] = useState(today);
-
-  const [campaigns, setCampaigns] = useState([]);
-
-  const [totalSpend, setTotalSpend] = useState(0);
-  const [loading, setLoading] = useState(false);
 
   const [sortConfig, setSortConfig] = useState({
     key: null,
@@ -81,86 +84,52 @@ export default function CampaignTesting() {
 
 
 
-  const fetchCampaigns = async () => {
+  // Phase 18 (part 2) — real SWR. Fans out one request per selected ad
+  // account (unchanged), but now the combined result is cached and
+  // background-refreshed like every other page instead of only ever
+  // loading on a manual click.
+  const campaignReportKey =
+    TOKEN_ID && selectedAccounts.length > 0 ? campaignReportCacheKey(TOKEN_ID, selectedAccounts, since, until) : null;
 
-    if (!selectedAccounts.length)
-      return;
+  const fetchCampaignReport = async () => {
+    const requests = selectedAccounts.map((accountId) =>
+      axios.get(`/api/campaigns/${TOKEN_ID}/date-range`, {
+        params: { adAccountId: accountId, since, until },
+      })
+    );
 
+    const responses = await Promise.all(requests);
 
-    setLoading(true);
+    let allCampaigns = [];
+    responses.forEach((res, index) => {
+      const accountId = selectedAccounts[index];
+      const data = res.data.campaigns || [];
+      allCampaigns.push(...data.map((c) => ({ ...c, accountId })));
+    });
 
+    const total = allCampaigns.reduce((sum, c) => sum + Number(c.spend || 0), 0);
+    return { campaigns: allCampaigns, totalSpend: total };
+  };
 
-    try {
+  const {
+    data: campaignReport,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(campaignReportKey, fetchCampaignReport, {
+    staleTimeMs: CAMPAIGN_REPORT_STALE_MS,
+    getCached: () => getCachedCampaignReport(TOKEN_ID, selectedAccounts, since, until),
+    setCached: (d) => setCachedCampaignReport(TOKEN_ID, selectedAccounts, since, until, d),
+  });
 
-      const requests = selectedAccounts.map(
-        (accountId) =>
-          axios.get(
-            `/api/campaigns/${TOKEN_ID}/date-range`,
-            {
-              params:{
-                adAccountId: accountId,
-                since,
-                until
-              }
-            }
-          )
-      );
+  const campaigns = campaignReport?.campaigns || [];
+  const totalSpend = campaignReport?.totalSpend || 0;
 
-
-      const responses = await Promise.all(requests);
-
-
-      let allCampaigns = [];
-
-
-      responses.forEach((res,index)=>{
-
-        const accountId =
-          selectedAccounts[index];
-
-
-        const data =
-          res.data.campaigns || [];
-
-
-        allCampaigns.push(
-          ...data.map(c=>({
-            ...c,
-            accountId
-          }))
-        );
-
-      });
-
-
-
-      setCampaigns(allCampaigns);
-
-
-      const total =
-        allCampaigns.reduce(
-          (sum,c)=>
-            sum + Number(c.spend || 0),
-          0
-        );
-
-
-      setTotalSpend(total);
-
-
-    } catch(err){
-
-      console.error(err);
-
-      alert(
-        "Failed to fetch campaigns"
-      );
-
-    }
-
-
-    setLoading(false);
-
+  const fetchCampaigns = () => {
+    if (!selectedAccounts.length) return;
+    refresh().catch(() => {});
   };
 
 
@@ -374,11 +343,16 @@ export default function CampaignTesting() {
         <button
           className="btn btn-primary"
           onClick={fetchCampaigns}
+          disabled={isValidating || !selectedAccounts.length}
         >
-          Fetch
+          <RefreshCw size={14} className={isValidating ? "animate-spin" : ""} /> {isValidating ? "Loading…" : "Fetch"}
         </button>
 
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+
       </div>
+
+      {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 mb-4">{error}</div>}
 
 
 
@@ -417,7 +391,7 @@ export default function CampaignTesting() {
 
 
       {
-        loading &&
+        isValidating && campaigns.length === 0 &&
         <div className="flex items-center gap-2 text-slate-500 text-sm my-4">
           <span className="spinner" /> Loading…
         </div>
@@ -428,7 +402,6 @@ export default function CampaignTesting() {
 
 
       {
-        !loading &&
         campaigns.length > 0 &&
 
         <div className="card p-0 overflow-x-auto">

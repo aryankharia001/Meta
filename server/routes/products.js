@@ -19,6 +19,7 @@ function shape(p) {
     name: p.name,
     sku: p.sku || "",
     variantId: p.variantId || "",
+    productId: p.productId || "",
     productCost: p.productCost || 0,
     packagingCost: p.packagingCost || 0,
     shippingCost: p.shippingCost || 0,
@@ -43,7 +44,7 @@ router.get("/", async (req, res) => {
 
 router.post("/", async (req, res) => {
   try {
-    const { name, sku, variantId, productCost, packagingCost, shippingCost, otherCost } = req.body || {};
+    const { name, sku, variantId, productId, productCost, packagingCost, shippingCost, otherCost } = req.body || {};
     if (!name || !String(name).trim()) {
       return res.status(400).json({ success: false, message: "Product name is required" });
     }
@@ -51,6 +52,7 @@ router.post("/", async (req, res) => {
       name: String(name).trim(),
       sku: (sku || "").trim(),
       variantId: (variantId || "").trim(),
+      productId: (productId || "").trim(),
       productCost: Number(productCost) || 0,
       packagingCost: Number(packagingCost) || 0,
       shippingCost: Number(shippingCost) || 0,
@@ -77,12 +79,13 @@ router.put("/:id", async (req, res) => {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ success: false, message: "Product not found" });
 
-    const { name, sku, variantId, productCost, packagingCost, shippingCost, otherCost, active } = req.body || {};
+    const { name, sku, variantId, productId, productCost, packagingCost, shippingCost, otherCost, active } = req.body || {};
     const skuChanged = sku !== undefined && (sku || "").trim() !== product.sku;
 
     if (name !== undefined) product.name = String(name).trim();
     if (sku !== undefined) product.sku = (sku || "").trim();
     if (variantId !== undefined) product.variantId = (variantId || "").trim();
+    if (productId !== undefined) product.productId = (productId || "").trim();
     if (productCost !== undefined) product.productCost = Number(productCost) || 0;
     if (packagingCost !== undefined) product.packagingCost = Number(packagingCost) || 0;
     if (shippingCost !== undefined) product.shippingCost = Number(shippingCost) || 0;

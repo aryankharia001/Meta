@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Layers, RefreshCw } from "lucide-react";
 import { fetchAdSets, fetchLiveAdAccounts } from "../lib/api";
+import { getCachedAdSetExplorer, setCachedAdSetExplorer, adSetExplorerCacheKey } from "../lib/adSetExplorerCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import { useAdSetDrawer } from "../lib/AdSetDrawerContext";
 import { todayIso, shiftDays } from "../lib/dateIst";
@@ -8,6 +11,10 @@ import DataTable from "../components/DataTable";
 import { AdSetNameCell } from "../components/AdSetCells";
 import { AD_SET_COLUMNS, AD_SET_DEFAULT_HIDDEN } from "../lib/adSetColumns";
 import { currency, number } from "../lib/format";
+
+// Phase 18 (part 2) — same "fast-moving campaign-adjacent data" reasoning
+// as Campaign Explorer.
+const ADSET_STALE_MS = 45000;
 
 // ─────────────────────────────────────────────────────────────
 // Phase 13 §4 — Ad Set Explorer. Entirely new page, built on the new
@@ -45,10 +52,6 @@ export default function AdSetExplorerPage() {
   const [paymentFilter, setPaymentFilter] = useState(""); // "", COD, PREPAID
   const [matchFilter, setMatchFilter] = useState(""); // "", matched, unmatched
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
   useEffect(() => {
     if (!TOKEN_ID) return;
     let cancelled = false;
@@ -66,20 +69,22 @@ export default function AdSetExplorerPage() {
     return () => { cancelled = true; };
   }, [TOKEN_ID]);
 
-  const load = () => {
-    if (!TOKEN_ID || selectedAccounts.length === 0) return;
-    setLoading(true);
-    setError("");
-    fetchAdSets(TOKEN_ID, { accountIds: selectedAccounts, since, until })
-      .then((res) => setData(res))
-      .catch((err) => setError(err.message || "Failed to load ad sets"))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [TOKEN_ID, selectedAccounts.join(","), since, until]);
+  // Phase 18 (part 2) — real SWR.
+  const adSetCacheKey =
+    TOKEN_ID && selectedAccounts.length > 0 ? adSetExplorerCacheKey(TOKEN_ID, selectedAccounts, since, until) : null;
+  const {
+    data,
+    loading,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(adSetCacheKey, () => fetchAdSets(TOKEN_ID, { accountIds: selectedAccounts, since, until }), {
+    staleTimeMs: ADSET_STALE_MS,
+    getCached: () => getCachedAdSetExplorer(TOKEN_ID, selectedAccounts, since, until),
+    setCached: (d) => setCachedAdSetExplorer(TOKEN_ID, selectedAccounts, since, until, d),
+  });
 
   const campaignOptions = useMemo(() => {
     const names = new Set((data?.adsets || []).map((a) => a.campaignName).filter(Boolean));
@@ -147,9 +152,10 @@ export default function AdSetExplorerPage() {
             <input type="date" className="input w-auto !py-1.5 !text-xs" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} />
           </>
         )}
-        <button type="button" className="btn btn-secondary btn-sm" onClick={load} disabled={loading}>
-          <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
+        <button type="button" className="btn btn-secondary btn-sm" onClick={refresh} disabled={isValidating}>
+          <RefreshCw size={13} className={isValidating ? "animate-spin" : ""} /> Refresh
         </button>
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
       </div>
 
       <div className="flex items-center gap-2 mb-5 flex-wrap">

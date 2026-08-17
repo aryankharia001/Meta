@@ -16,6 +16,7 @@ import {
   Clock4,
   X,
   Loader2,
+  HelpCircle,
 } from "lucide-react";
 import {
   fetchProfitSummary,
@@ -35,6 +36,55 @@ import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import CampaignLink from "../components/CampaignLink";
 import DataTable from "../components/DataTable";
 import HourOrdersPopup from "../components/daily/HourOrdersPopup";
+// Phase 18 §3 — expense drill-down popups ("what's behind this number")
+// and §4 — HALUCINATE what-if scenario mode. Both entirely new, additive,
+// scoped to this page only (see file-level comments in each for why they
+// live in their own components/lib modules instead of growing this file
+// further).
+import { ExpenseOrdersPopup, CampaignSpendPopup, OperatingExpenseBreakdownPopup } from "../components/profitability/ExpenseDrillPopups";
+import HalucinatePanel, { ValueWithScenario, HalucinateTabBanner, HALUCINATE_CSS } from "../components/profitability/HalucinatePanel";
+import { emptyScenario, isScenarioActive, computeScenario, wrapRollupAsScenarioData, buildScenarioRatios, applyScenarioToRow } from "../lib/scenarioMath";
+// Phase 18 (part 2) — SWR data-loading plumbing for this page's 5 tabs.
+// Purely additive on top of the Phase 18 §3/§4 work above — only touches
+// each tab's own useState+useEffect+fetch* pattern, never the HALUCINATE
+// panel, drill-down popups, or scenario math.
+import {
+  getCachedProfitSummary,
+  setCachedProfitSummary,
+  getCachedProfitCampaigns,
+  setCachedProfitCampaigns,
+  getCachedProfitDaily,
+  setCachedProfitDaily,
+  getCachedProfitCodPrepaid,
+  setCachedProfitCodPrepaid,
+  getCachedProfitProducts,
+  setCachedProfitProducts,
+  profitCacheKey,
+} from "../lib/profitabilityCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
+
+// Profit numbers depend on orders (which move continuously through the
+// day) — a middle-ground stale time between the fast Dashboard/Explorer
+// pages and the slower Products/Expenses config pages.
+const PROFIT_STALE_MS = 60000;
+
+// Every tab shares the page-level "refreshKey" (bumped by the header's
+// Refresh button and by CodRateControl's onSaved — changing the COD rate
+// must always show fresh numbers immediately). refreshKey is deliberately
+// NOT part of the SWR cache key (it's a "force a refetch now" signal, not
+// part of "what data to fetch") — instead each tab watches it with the
+// same ref-guarded pattern Dashboard.jsx's own live-sync effect uses, and
+// calls the SWR hook's refresh() when it changes.
+function useForceRefreshOnKeyBump(key, refresh) {
+  const prevRef = useRef(key);
+  useEffect(() => {
+    if (key === prevRef.current) return;
+    prevRef.current = key;
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+}
 
 // ─────────────────────────────────────────────────────────────
 // Phase 16 — Profitability. Entirely new, additive top-level page.
@@ -92,22 +142,40 @@ function StatCard({ label, value, kind = "currency", sub, tone }) {
   );
 }
 
-function SectionCard({ title, children, accent }) {
+function SectionCard({ title, children, accent, className }) {
   return (
-    <div className="card">
+    <div className={`card transition-all duration-500 ${className || ""}`}>
       <h3 className={`text-xs font-display font-semibold uppercase tracking-wide mb-3 ${accent || "text-slate-500"}`}>{title}</h3>
       {children}
     </div>
   );
 }
 
-function Row({ label, value, bold }) {
-  return (
-    <div className="flex items-center justify-between py-1 text-sm">
+// Phase 18 §3 — every Row in the Expenses card (and a few in Revenue/
+// Final Result) is now optionally clickable ("what's behind this
+// number"): pass `onClick` and it renders as a full-width button with a
+// hover state instead of a plain div, same label/value layout either way
+// so nothing about the existing look changes when onClick is omitted.
+function Row({ label, value, bold, onClick, title }) {
+  const content = (
+    <>
       <span className="text-slate-500">{label}</span>
       <span className={bold ? "font-semibold text-slate-800" : "text-slate-700"}>{value}</span>
-    </div>
+    </>
   );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        title={title || "Click to see what's behind this number"}
+        onClick={onClick}
+        className="w-full flex items-center justify-between py-1 text-sm text-left rounded-lg px-1.5 -mx-1.5 hover:bg-slate-50 transition-colors cursor-pointer"
+      >
+        {content}
+      </button>
+    );
+  }
+  return <div className="flex items-center justify-between py-1 text-sm">{content}</div>;
 }
 
 function AccountsPicker({ accounts, selected, loading, onToggle, onSelectAll, onClear }) {
@@ -205,37 +273,80 @@ function CodRateControl({ rate, onSaved }) {
 }
 
 // ── Overview tab (§4/§10/§11/§12/§20/§21) ──────────────────────────
-function OverviewTab({ tokenId, accountIds, since, until, refreshKey }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+// Phase 19 §3.5 — scenario state (scenario/setScenario/scenarioActive/
+// resetScenario) now lives in the parent ProfitabilityPage instead of
+// here, so it survives switching tabs and can be reused by
+// CampaignsTab/DailyTab below. The reset-on-range-change effect moved up
+// with it (see ProfitabilityPage). Everything else about this tab is
+// unchanged.
+function OverviewTab({ tokenId, accountIds, since, until, refreshKey, scenario, setScenario, scenarioActive, resetScenario }) {
+  const overviewKey = tokenId && accountIds.length > 0 ? profitCacheKey(tokenId, accountIds, since, until) : null;
+  const { data, loading, isValidating, error, backgroundError, lastUpdatedAt, refresh } = useSwrFetch(
+    overviewKey,
+    () => fetchProfitSummary(tokenId, { accountIds, since, until }),
+    {
+      staleTimeMs: PROFIT_STALE_MS,
+      getCached: () => getCachedProfitSummary(tokenId, accountIds, since, until),
+      setCached: (d) => setCachedProfitSummary(tokenId, accountIds, since, until, d),
+    }
+  );
+  useForceRefreshOnKeyBump(refreshKey, refresh);
   const { openCampaign } = useCampaignDrawer();
 
-  useEffect(() => {
-    if (!tokenId || accountIds.length === 0) return;
-    let cancelled = false;
-    setLoading(true);
-    setError("");
-    fetchProfitSummary(tokenId, { accountIds, since, until })
-      .then((res) => !cancelled && setData(res))
-      .catch((err) => !cancelled && setError(err.message || "Failed to load profitability summary"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
-  }, [tokenId, accountIds, since, until, refreshKey]);
+  // Phase 18 §3 — which expense drill-down popup (if any) is open.
+  // { kind: "orders", type: "productCost"|"packagingCost"|"shippingCost"|"otherCost"|"unmapped" } | { kind: "campaigns" } | { kind: "operating" } | null
+  const [drill, setDrill] = useState(null);
 
-  if (loading && !data) return <SkeletonBlock />;
+  // Phase 18 §4 — HALUCINATE scenario result for THIS tab's own /summary
+  // data. Still computed locally (each tab computes its own
+  // scenarioResult from its own fetched data), only the raw override
+  // state itself is lifted.
+  const scenarioResult = useMemo(() => (scenarioActive ? computeScenario(data, scenario) : null), [scenarioActive, data, scenario]);
+
+  if (loading) return <SkeletonBlock />;
   if (error) return <ErrorState message={error} />;
   if (!data) return null;
 
   const { revenue, expenses, result, bestCampaign, worstCampaign, bestDay, highestProfitHour } = data;
+  const hasUnmapped = (expenses.unmappedProductUnits || 0) > 0;
+  // Phase 19 §2/§5 — distinct from hasUnmapped above: this counts orders
+  // whose raw payload had NO recognizable product-line-items array at all
+  // (a data-shape gap upstream of product matching), never orders that
+  // simply didn't match a configured Product. See the big comment on
+  // expenses.ordersWithNoLineItemsFound in server/routes/profitability.js.
+  const hasNoLineItems = (expenses.ordersWithNoLineItemsFound || 0) > 0;
 
   return (
     <div className="space-y-6">
+      <div className="flex justify-end -mb-2">
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+      </div>
+      <HalucinatePanel scenario={scenario} setScenario={setScenario} active={scenarioActive} onReset={resetScenario} data={data} scenarioResult={scenarioResult} />
+
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-        <StatCard label="Net Profit" value={result.netProfit} tone={result.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"} />
-        <StatCard label="Profit Margin" value={result.profitMargin} kind="percent" tone={result.profitMargin >= 0 ? "text-emerald-600" : "text-rose-600"} />
-        <StatCard label="Total Recognized Revenue" value={revenue.totalRecognizedRevenue} />
-        <StatCard label="Total Expenses" value={expenses.totalExpenses} />
+        <StatCard
+          label="Net Profit"
+          value={result.netProfit}
+          tone={result.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"}
+          sub={scenarioActive ? `Scenario: ${currency(scenarioResult.netProfit)}` : undefined}
+        />
+        <StatCard
+          label="Profit Margin"
+          value={result.profitMargin}
+          kind="percent"
+          tone={result.profitMargin >= 0 ? "text-emerald-600" : "text-rose-600"}
+          sub={scenarioActive ? `Scenario: ${percent(scenarioResult.profitMargin)}` : undefined}
+        />
+        <StatCard
+          label="Total Recognized Revenue"
+          value={revenue.totalRecognizedRevenue}
+          sub={scenarioActive ? `Scenario: ${currency(scenarioResult.totalRecognizedRevenue)}` : undefined}
+        />
+        <StatCard
+          label="Total Expenses"
+          value={expenses.totalExpenses}
+          sub={scenarioActive ? `Scenario: ${currency(scenarioResult.totalExpenses)}` : undefined}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -245,28 +356,106 @@ function OverviewTab({ tokenId, accountIds, since, until, refreshKey }) {
           <Row label="COD Revenue (gross)" value={currency(revenue.codRevenue)} />
           <div className="border-t border-slate-100 my-1.5" />
           <Row label="Recognized Prepaid Revenue" value={currency(revenue.recognizedPrepaidRevenue)} />
-          <Row label="Recognized COD Revenue" value={currency(revenue.recognizedCodRevenue)} />
-          <Row label="Total Recognized Revenue" value={<ProfitValue value={revenue.totalRecognizedRevenue} />} bold />
+          <Row
+            label="Recognized COD Revenue"
+            value={<ValueWithScenario actual={revenue.recognizedCodRevenue} scenarioValue={scenarioResult?.recognizedCodRevenue} active={scenarioActive} />}
+          />
+          <Row
+            label="Total Recognized Revenue"
+            value={scenarioActive ? <ValueWithScenario actual={revenue.totalRecognizedRevenue} scenarioValue={scenarioResult.totalRecognizedRevenue} active kind="currency" /> : <ProfitValue value={revenue.totalRecognizedRevenue} />}
+            bold
+          />
         </SectionCard>
 
-        <SectionCard title="Expenses" accent="text-amber-600">
-          <Row label="Product Cost" value={currency(expenses.productCost)} />
-          <Row label="Packaging Cost" value={currency(expenses.packagingCost)} />
-          <Row label="Shipping Cost" value={currency(expenses.shippingCost)} />
-          <Row label="Other Per-Order Cost" value={currency(expenses.otherCost)} />
-          <Row label="Total Product Expense" value={currency(expenses.totalProductExpense)} bold />
+        <SectionCard title="Expenses" accent="text-amber-600" className={scenarioActive ? "halucinate-card" : ""}>
+          <Row
+            label="Product Cost"
+            value={<ValueWithScenario actual={expenses.productCost} scenarioValue={scenarioResult?.productCost} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "orders", type: "productCost" })}
+          />
+          <Row
+            label="Packaging Cost"
+            value={<ValueWithScenario actual={expenses.packagingCost} scenarioValue={scenarioResult?.packagingCost} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "orders", type: "packagingCost" })}
+          />
+          <Row
+            label="Shipping Cost"
+            value={<ValueWithScenario actual={expenses.shippingCost} scenarioValue={scenarioResult?.shippingCost} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "orders", type: "shippingCost" })}
+          />
+          <Row
+            label="Other Per-Order Cost"
+            value={<ValueWithScenario actual={expenses.otherCost} scenarioValue={scenarioResult?.otherCost} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "orders", type: "otherCost" })}
+          />
+          <Row
+            label="Total Product Expense"
+            value={<ValueWithScenario actual={expenses.totalProductExpense} scenarioValue={scenarioResult?.totalProductExpense} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "orders", type: "totalCost" })}
+            bold
+          />
+          {hasUnmapped && (
+            <button
+              type="button"
+              onClick={() => setDrill({ kind: "orders", type: "unmapped" })}
+              className="mt-1.5 w-full flex items-start gap-1.5 text-left text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 hover:bg-amber-100 transition-colors"
+            >
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              <span>
+                <strong>{fmtNumber(expenses.unmappedProductUnits)}</strong> unit{expenses.unmappedProductUnits === 1 ? "" : "s"} across{" "}
+                <strong>{fmtNumber(expenses.unmappedProductOrders)}</strong> order{expenses.unmappedProductOrders === 1 ? "" : "s"} have no cost config
+                — Product Cost may be understated. Click to see them.
+              </span>
+            </button>
+          )}
+          {/* Phase 19 §2/§5 — a DIFFERENT failure mode from the amber
+              "unmapped" box above, so it's deliberately a different color
+              (sky, not amber) and deliberately not clickable (there's no
+              per-order list for this yet — an admin can pull the exact
+              order via the new /debug/sample-order-shape endpoint). Worded
+              for a non-technical user: this means the order's underlying
+              data didn't look like a product order at all, so configuring
+              Product Cost pages won't help — it's a data problem, not a
+              settings problem. */}
+          {hasNoLineItems && (
+            <div className="mt-1.5 w-full flex items-start gap-1.5 text-left text-[11px] text-sky-700 bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1.5">
+              <HelpCircle size={12} className="mt-0.5 shrink-0" />
+              <span>
+                <strong>{fmtNumber(expenses.ordersWithNoLineItemsFound)}</strong> order{expenses.ordersWithNoLineItemsFound === 1 ? "" : "s"} had no
+                recognizable product data at all in their order info — this is a <strong>data-shape issue</strong>, not a missing cost setup.
+                Configuring product costs will not fix this on its own; it means these orders' underlying data doesn't match any format this app
+                currently understands. If you're an admin, use the Sample Order Shape diagnostic to see exactly what's in one of these orders.
+              </span>
+            </div>
+          )}
           <div className="border-t border-slate-100 my-1.5" />
-          <Row label="Advertising Expense (Meta Spend)" value={currency(expenses.advertisingExpense)} />
-          <Row label="Operating Expenses" value={currency(expenses.operatingExpense)} />
-          <Row label="Total Expenses" value={currency(expenses.totalExpenses)} bold />
+          <Row
+            label="Advertising Expense (Meta Spend)"
+            value={<ValueWithScenario actual={expenses.advertisingExpense} scenarioValue={scenarioResult?.advertisingExpense} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "campaigns" })}
+          />
+          <Row
+            label="Operating Expenses"
+            value={<ValueWithScenario actual={expenses.operatingExpense} scenarioValue={scenarioResult?.operatingExpense} active={scenarioActive} />}
+            onClick={() => setDrill({ kind: "operating" })}
+          />
+          <Row
+            label="Total Expenses"
+            value={<ValueWithScenario actual={expenses.totalExpenses} scenarioValue={scenarioResult?.totalExpenses} active={scenarioActive} />}
+            bold
+          />
         </SectionCard>
 
-        <SectionCard title="Final Result" accent="text-slate-700">
-          <Row label="Total Recognized Revenue" value={currency(revenue.totalRecognizedRevenue)} />
-          <Row label="Total Expenses" value={currency(expenses.totalExpenses)} />
+        <SectionCard title="Final Result" accent="text-slate-700" className={scenarioActive ? "halucinate-card" : ""}>
+          <Row label="Total Recognized Revenue" value={<ValueWithScenario actual={revenue.totalRecognizedRevenue} scenarioValue={scenarioResult?.totalRecognizedRevenue} active={scenarioActive} />} />
+          <Row label="Total Expenses" value={<ValueWithScenario actual={expenses.totalExpenses} scenarioValue={scenarioResult?.totalExpenses} active={scenarioActive} />} />
           <div className="border-t border-slate-100 my-1.5" />
-          <Row label="Net Profit" value={<ProfitValue value={result.netProfit} />} bold />
-          <Row label="Profit Margin" value={<ProfitValue value={result.profitMargin} kind="percent" />} bold />
+          <Row label="Net Profit" value={scenarioActive ? <ValueWithScenario actual={result.netProfit} scenarioValue={scenarioResult.netProfit} active /> : <ProfitValue value={result.netProfit} />} bold />
+          <Row
+            label="Profit Margin"
+            value={scenarioActive ? <ValueWithScenario actual={result.profitMargin} scenarioValue={scenarioResult.profitMargin} active kind="percent" /> : <ProfitValue value={result.profitMargin} kind="percent" />}
+            bold
+          />
           <Row label="ROAS (on ad spend)" value={multiplier(result.roas)} />
           <Row label="Orders" value={fmtNumber(result.orders)} />
         </SectionCard>
@@ -313,6 +502,24 @@ function OverviewTab({ tokenId, accountIds, since, until, refreshKey }) {
           </div>
         )}
       </div>
+
+      <ExpenseOrdersPopup
+        open={drill?.kind === "orders"}
+        tokenId={tokenId}
+        accountIds={accountIds}
+        since={since}
+        until={until}
+        type={drill?.kind === "orders" ? drill.type : "totalCost"}
+        onClose={() => setDrill(null)}
+      />
+      <CampaignSpendPopup open={drill?.kind === "campaigns"} tokenId={tokenId} accountIds={accountIds} since={since} until={until} onClose={() => setDrill(null)} />
+      <OperatingExpenseBreakdownPopup
+        open={drill?.kind === "operating"}
+        breakdown={expenses.operatingExpenseBreakdown}
+        since={since}
+        until={until}
+        onClose={() => setDrill(null)}
+      />
     </div>
   );
 }
@@ -344,27 +551,43 @@ function HighlightCard({ icon: Icon, tone, title, item, renderLabel, onClick }) 
 }
 
 // ── Campaign Profit tab (§13) ───────────────────────────────────────
-function CampaignsTab({ tokenId, accountIds, since, until, refreshKey }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+// Phase 19 §3.5 — now HALUCINATE-aware. Full per-row proportional
+// adjustment (not just a top banner): each row's own totalRecognizedRevenue/
+// totalProductExpense/totalExpenses/netProfit/profitMargin is recomputed
+// via applyScenarioToRow() using ratios derived from this tab's own
+// `totals` (the same rollupOrders() shape /summary uses), so the relative
+// scenario delta each cost category has overall is applied to each
+// campaign's own actual figures. See lib/scenarioMath.js for why this is
+// a proportional approximation rather than a full per-order recompute.
+function CampaignsTab({ tokenId, accountIds, since, until, refreshKey, scenario, scenarioActive }) {
+  const campaignsKey = tokenId && accountIds.length > 0 ? profitCacheKey(tokenId, accountIds, since, until) : null;
+  const { data, loading, isValidating, error, backgroundError, lastUpdatedAt, refresh } = useSwrFetch(
+    campaignsKey,
+    () => fetchProfitCampaigns(tokenId, { accountIds, since, until }),
+    {
+      staleTimeMs: PROFIT_STALE_MS,
+      getCached: () => getCachedProfitCampaigns(tokenId, accountIds, since, until),
+      setCached: (d) => setCachedProfitCampaigns(tokenId, accountIds, since, until, d),
+    }
+  );
+  useForceRefreshOnKeyBump(refreshKey, refresh);
   const { openCampaign } = useCampaignDrawer();
 
-  useEffect(() => {
-    if (!tokenId || accountIds.length === 0) return;
-    let cancelled = false;
-    setLoading(true);
-    setError("");
-    fetchProfitCampaigns(tokenId, { accountIds, since, until })
-      .then((res) => !cancelled && setData(res))
-      .catch((err) => !cancelled && setError(err.message || "Failed to load campaign profit"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
-  }, [tokenId, accountIds, since, until, refreshKey]);
+  const scenarioData = useMemo(() => (data ? wrapRollupAsScenarioData(data.totals, data.codSuccessRate) : null), [data]);
+  const scenarioResult = useMemo(() => (scenarioActive && scenarioData ? computeScenario(scenarioData, scenario) : null), [scenarioActive, scenarioData, scenario]);
+  const ratios = useMemo(() => (scenarioActive && scenarioData ? buildScenarioRatios(scenarioData, scenario) : null), [scenarioActive, scenarioData, scenario]);
+  const adjustedByKey = useMemo(() => {
+    if (!scenarioActive || !ratios || !data) return null;
+    const map = new Map();
+    data.campaigns.forEach((c) => map.set(c.campaignId || `unmatched:${c.campaignName}`, applyScenarioToRow(c, ratios)));
+    return map;
+  }, [scenarioActive, ratios, data]);
 
-  if (loading && !data) return <SkeletonBlock />;
+  if (loading) return <SkeletonBlock />;
   if (error) return <ErrorState message={error} />;
   if (!data) return null;
+
+  const adjOf = (c) => adjustedByKey?.get(c.campaignId || `unmatched:${c.campaignName}`);
 
   const columns = [
     {
@@ -379,26 +602,73 @@ function CampaignsTab({ tokenId, accountIds, since, until, refreshKey }) {
     },
     { key: "orders", label: "Orders", render: (c) => fmtNumber(c.orders) },
     { key: "grossRevenue", label: "Revenue", render: (c) => currency(c.grossRevenue) },
-    { key: "totalRecognizedRevenue", label: "Recognized Revenue", render: (c) => currency(c.totalRecognizedRevenue) },
+    {
+      key: "totalRecognizedRevenue",
+      label: "Recognized Revenue",
+      render: (c) => <ValueWithScenario actual={c.totalRecognizedRevenue} scenarioValue={adjOf(c)?.totalRecognizedRevenue} active={scenarioActive} />,
+    },
     { key: "spend", label: "Spend", render: (c) => currency(c.spend) },
-    { key: "totalProductExpense", label: "Product Cost", render: (c) => currency(c.totalProductExpense) },
+    {
+      key: "totalProductExpense",
+      label: "Product Cost",
+      render: (c) => <ValueWithScenario actual={c.totalProductExpense} scenarioValue={adjOf(c)?.totalProductExpense} active={scenarioActive} />,
+    },
     { key: "operatingExpense", label: "Allocated Op. Expense", render: (c) => currency(c.operatingExpense) },
-    { key: "totalExpenses", label: "Total Expenses", render: (c) => currency(c.totalExpenses) },
-    { key: "netProfit", label: "Net Profit", render: (c) => <ProfitValue value={c.netProfit} /> },
-    { key: "profitMargin", label: "Profit Margin", render: (c) => <ProfitValue value={c.profitMargin} kind="percent" /> },
+    {
+      key: "totalExpenses",
+      label: "Total Expenses",
+      render: (c) => <ValueWithScenario actual={c.totalExpenses} scenarioValue={adjOf(c)?.totalExpenses} active={scenarioActive} />,
+    },
+    {
+      key: "netProfit",
+      label: "Net Profit",
+      render: (c) => (scenarioActive && adjOf(c) ? <ValueWithScenario actual={c.netProfit} scenarioValue={adjOf(c).netProfit} active /> : <ProfitValue value={c.netProfit} />),
+    },
+    {
+      key: "profitMargin",
+      label: "Profit Margin",
+      render: (c) =>
+        scenarioActive && adjOf(c) ? (
+          <ValueWithScenario actual={c.profitMargin} scenarioValue={adjOf(c).profitMargin} active kind="percent" />
+        ) : (
+          <ProfitValue value={c.profitMargin} kind="percent" />
+        ),
+    },
     { key: "roas", label: "ROAS", render: (c) => multiplier(c.roas) },
   ];
 
   return (
     <div className="space-y-4">
+      <div className="flex justify-end">
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+      </div>
+      {scenarioActive && scenarioResult && (
+        <HalucinateTabBanner scenarioResult={scenarioResult} actualNetProfit={data.totals.netProfit} actualProfitMargin={data.totals.profitMargin} />
+      )}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-        <StatCard label="Total Recognized Revenue" value={data.totals.totalRecognizedRevenue} />
-        <StatCard label="Total Expenses" value={data.totals.totalExpenses} />
-        <StatCard label="Net Profit" value={data.totals.netProfit} tone={data.totals.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"} />
-        <StatCard label="Profit Margin" value={data.totals.profitMargin} kind="percent" tone={data.totals.profitMargin >= 0 ? "text-emerald-600" : "text-rose-600"} />
+        <StatCard
+          label="Total Recognized Revenue"
+          value={data.totals.totalRecognizedRevenue}
+          sub={scenarioActive && scenarioResult ? `Scenario: ${currency(scenarioResult.totalRecognizedRevenue)}` : undefined}
+        />
+        <StatCard label="Total Expenses" value={data.totals.totalExpenses} sub={scenarioActive && scenarioResult ? `Scenario: ${currency(scenarioResult.totalExpenses)}` : undefined} />
+        <StatCard
+          label="Net Profit"
+          value={data.totals.netProfit}
+          tone={data.totals.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"}
+          sub={scenarioActive && scenarioResult ? `Scenario: ${currency(scenarioResult.netProfit)}` : undefined}
+        />
+        <StatCard
+          label="Profit Margin"
+          value={data.totals.profitMargin}
+          kind="percent"
+          tone={data.totals.profitMargin >= 0 ? "text-emerald-600" : "text-rose-600"}
+          sub={scenarioActive && scenarioResult ? `Scenario: ${percent(scenarioResult.profitMargin)}` : undefined}
+        />
       </div>
       <p className="text-[11px] text-slate-400">
         Allocated Operating Expense is split across campaigns proportional to each campaign's share of recognized revenue in this range.
+        {scenarioActive && " Recognized Revenue/Product Cost/Total Expenses/Net Profit/Margin above are HALUCINATE scenario estimates, proportionally adjusted per campaign."}
       </p>
       <DataTable
         tableId="profit-campaigns"
@@ -415,50 +685,113 @@ function CampaignsTab({ tokenId, accountIds, since, until, refreshKey }) {
 }
 
 // ── Daily Profit tab (§14) ──────────────────────────────────────────
-function DailyTab({ tokenId, accountIds, since, until, refreshKey }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+// Phase 19 §3.5 — same HALUCINATE propagation approach as CampaignsTab
+// above: full per-row proportional adjustment via applyScenarioToRow(),
+// ratios derived from this tab's own `totals`. The per-hour drill-down
+// (HourlyProfitModal below) is NOT scenario-adjusted — out of this
+// phase's time budget, see Phase 19 report.
+function DailyTab({ tokenId, accountIds, since, until, refreshKey, scenario, scenarioActive }) {
   const [openDate, setOpenDate] = useState(null);
 
-  useEffect(() => {
-    if (!tokenId || accountIds.length === 0) return;
-    let cancelled = false;
-    setLoading(true);
-    setError("");
-    fetchProfitDaily(tokenId, { accountIds, since, until })
-      .then((res) => !cancelled && setData(res))
-      .catch((err) => !cancelled && setError(err.message || "Failed to load daily profit"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
-  }, [tokenId, accountIds, since, until, refreshKey]);
+  const dailyKey = tokenId && accountIds.length > 0 ? profitCacheKey(tokenId, accountIds, since, until) : null;
+  const { data, loading, isValidating, error, backgroundError, lastUpdatedAt, refresh } = useSwrFetch(
+    dailyKey,
+    () => fetchProfitDaily(tokenId, { accountIds, since, until }),
+    {
+      staleTimeMs: PROFIT_STALE_MS,
+      getCached: () => getCachedProfitDaily(tokenId, accountIds, since, until),
+      setCached: (d) => setCachedProfitDaily(tokenId, accountIds, since, until, d),
+    }
+  );
+  useForceRefreshOnKeyBump(refreshKey, refresh);
 
-  if (loading && !data) return <SkeletonBlock />;
+  const scenarioData = useMemo(() => (data ? wrapRollupAsScenarioData(data.totals, data.codSuccessRate) : null), [data]);
+  const scenarioResult = useMemo(() => (scenarioActive && scenarioData ? computeScenario(scenarioData, scenario) : null), [scenarioActive, scenarioData, scenario]);
+  const ratios = useMemo(() => (scenarioActive && scenarioData ? buildScenarioRatios(scenarioData, scenario) : null), [scenarioActive, scenarioData, scenario]);
+  const adjustedByDate = useMemo(() => {
+    if (!scenarioActive || !ratios || !data) return null;
+    const map = new Map();
+    data.days.forEach((d) => map.set(d.date, applyScenarioToRow(d, ratios)));
+    return map;
+  }, [scenarioActive, ratios, data]);
+
+  if (loading) return <SkeletonBlock />;
   if (error) return <ErrorState message={error} />;
   if (!data) return null;
+
+  const adjOf = (d) => adjustedByDate?.get(d.date);
 
   const columns = [
     { key: "date", label: "Date", render: (d) => formatDayLabel(d.date) },
     { key: "orders", label: "Orders", render: (d) => fmtNumber(d.orders) },
     { key: "grossRevenue", label: "Revenue", render: (d) => currency(d.grossRevenue) },
-    { key: "totalRecognizedRevenue", label: "Recognized Revenue", render: (d) => currency(d.totalRecognizedRevenue) },
+    {
+      key: "totalRecognizedRevenue",
+      label: "Recognized Revenue",
+      render: (d) => <ValueWithScenario actual={d.totalRecognizedRevenue} scenarioValue={adjOf(d)?.totalRecognizedRevenue} active={scenarioActive} />,
+    },
     { key: "spend", label: "Spend", render: (d) => currency(d.spend) },
-    { key: "totalProductExpense", label: "Product Cost", render: (d) => currency(d.totalProductExpense) },
+    {
+      key: "totalProductExpense",
+      label: "Product Cost",
+      render: (d) => <ValueWithScenario actual={d.totalProductExpense} scenarioValue={adjOf(d)?.totalProductExpense} active={scenarioActive} />,
+    },
     { key: "operatingExpense", label: "Operating Expense", render: (d) => currency(d.operatingExpense) },
-    { key: "totalExpenses", label: "Total Expenses", render: (d) => currency(d.totalExpenses) },
-    { key: "netProfit", label: "Profit", render: (d) => <ProfitValue value={d.netProfit} /> },
-    { key: "profitMargin", label: "Profit Margin", render: (d) => <ProfitValue value={d.profitMargin} kind="percent" /> },
+    {
+      key: "totalExpenses",
+      label: "Total Expenses",
+      render: (d) => <ValueWithScenario actual={d.totalExpenses} scenarioValue={adjOf(d)?.totalExpenses} active={scenarioActive} />,
+    },
+    {
+      key: "netProfit",
+      label: "Profit",
+      render: (d) => (scenarioActive && adjOf(d) ? <ValueWithScenario actual={d.netProfit} scenarioValue={adjOf(d).netProfit} active /> : <ProfitValue value={d.netProfit} />),
+    },
+    {
+      key: "profitMargin",
+      label: "Profit Margin",
+      render: (d) =>
+        scenarioActive && adjOf(d) ? (
+          <ValueWithScenario actual={d.profitMargin} scenarioValue={adjOf(d).profitMargin} active kind="percent" />
+        ) : (
+          <ProfitValue value={d.profitMargin} kind="percent" />
+        ),
+    },
   ];
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-        <StatCard label="Total Recognized Revenue" value={data.totals.totalRecognizedRevenue} />
-        <StatCard label="Total Expenses" value={data.totals.totalExpenses} />
-        <StatCard label="Net Profit" value={data.totals.netProfit} tone={data.totals.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"} />
-        <StatCard label="Profit Margin" value={data.totals.profitMargin} kind="percent" tone={data.totals.profitMargin >= 0 ? "text-emerald-600" : "text-rose-600"} />
+      <div className="flex justify-end">
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
       </div>
-      <p className="text-[11px] text-slate-400">Click a date to see its hour-by-hour Revenue → Expenses → Profit breakdown.</p>
+      {scenarioActive && scenarioResult && (
+        <HalucinateTabBanner scenarioResult={scenarioResult} actualNetProfit={data.totals.netProfit} actualProfitMargin={data.totals.profitMargin} />
+      )}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+        <StatCard
+          label="Total Recognized Revenue"
+          value={data.totals.totalRecognizedRevenue}
+          sub={scenarioActive && scenarioResult ? `Scenario: ${currency(scenarioResult.totalRecognizedRevenue)}` : undefined}
+        />
+        <StatCard label="Total Expenses" value={data.totals.totalExpenses} sub={scenarioActive && scenarioResult ? `Scenario: ${currency(scenarioResult.totalExpenses)}` : undefined} />
+        <StatCard
+          label="Net Profit"
+          value={data.totals.netProfit}
+          tone={data.totals.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"}
+          sub={scenarioActive && scenarioResult ? `Scenario: ${currency(scenarioResult.netProfit)}` : undefined}
+        />
+        <StatCard
+          label="Profit Margin"
+          value={data.totals.profitMargin}
+          kind="percent"
+          tone={data.totals.profitMargin >= 0 ? "text-emerald-600" : "text-rose-600"}
+          sub={scenarioActive && scenarioResult ? `Scenario: ${percent(scenarioResult.profitMargin)}` : undefined}
+        />
+      </div>
+      <p className="text-[11px] text-slate-400">
+        Click a date to see its hour-by-hour Revenue → Expenses → Profit breakdown.
+        {scenarioActive && " Recognized Revenue/Product Cost/Total Expenses/Profit/Margin above are HALUCINATE scenario estimates, proportionally adjusted per day (the hourly drill-down still shows actual numbers only)."}
+      </p>
       <DataTable
         tableId="profit-daily"
         columns={columns}
@@ -592,29 +925,29 @@ function HourlyProfitModal({ tokenId, accountIds, date, onClose }) {
 
 // ── COD vs Prepaid tab (§17) ────────────────────────────────────────
 function CodPrepaidTab({ tokenId, accountIds, since, until, refreshKey }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const codPrepaidKey = tokenId && accountIds.length > 0 ? profitCacheKey(tokenId, accountIds, since, until) : null;
+  const { data, loading, isValidating, error, backgroundError, lastUpdatedAt, refresh } = useSwrFetch(
+    codPrepaidKey,
+    () => fetchProfitCodPrepaid(tokenId, { accountIds, since, until }),
+    {
+      staleTimeMs: PROFIT_STALE_MS,
+      getCached: () => getCachedProfitCodPrepaid(tokenId, accountIds, since, until),
+      setCached: (d) => setCachedProfitCodPrepaid(tokenId, accountIds, since, until, d),
+    }
+  );
+  useForceRefreshOnKeyBump(refreshKey, refresh);
 
-  useEffect(() => {
-    if (!tokenId || accountIds.length === 0) return;
-    let cancelled = false;
-    setLoading(true);
-    setError("");
-    fetchProfitCodPrepaid(tokenId, { accountIds, since, until })
-      .then((res) => !cancelled && setData(res))
-      .catch((err) => !cancelled && setError(err.message || "Failed to load COD vs Prepaid breakdown"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
-  }, [tokenId, accountIds, since, until, refreshKey]);
-
-  if (loading && !data) return <SkeletonBlock />;
+  if (loading) return <SkeletonBlock />;
   if (error) return <ErrorState message={error} />;
   if (!data) return null;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <SectionCard title="Prepaid" accent="text-blue-600">
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <SectionCard title="Prepaid" accent="text-blue-600">
         <Row label="Orders" value={fmtNumber(data.prepaid.orders)} bold />
         <Row label="Revenue" value={currency(data.prepaid.revenue)} />
         <div className="border-t border-slate-100 my-1.5" />
@@ -641,35 +974,44 @@ function CodPrepaidTab({ tokenId, accountIds, since, until, refreshKey }) {
         <Row label="Expected Profit Margin" value={<ProfitValue value={data.cod.expectedProfitMargin} kind="percent" />} bold />
         <p className="text-[10px] text-amber-600 mt-2 flex items-center gap-1"><AlertTriangle size={11} /> Estimated — assumes {data.codSuccessRate}% COD success rate.</p>
       </SectionCard>
+      </div>
     </div>
   );
 }
 
 // ── Product Profitability tab (§22) ─────────────────────────────────
 function ProductsTab({ tokenId, accountIds, since, until, refreshKey }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const productsKey = tokenId && accountIds.length > 0 ? profitCacheKey(tokenId, accountIds, since, until) : null;
+  const { data, loading, isValidating, error, backgroundError, lastUpdatedAt, refresh } = useSwrFetch(
+    productsKey,
+    () => fetchProfitProducts(tokenId, { accountIds, since, until }),
+    {
+      staleTimeMs: PROFIT_STALE_MS,
+      getCached: () => getCachedProfitProducts(tokenId, accountIds, since, until),
+      setCached: (d) => setCachedProfitProducts(tokenId, accountIds, since, until, d),
+    }
+  );
+  useForceRefreshOnKeyBump(refreshKey, refresh);
 
-  useEffect(() => {
-    if (!tokenId || accountIds.length === 0) return;
-    let cancelled = false;
-    setLoading(true);
-    setError("");
-    fetchProfitProducts(tokenId, { accountIds, since, until })
-      .then((res) => !cancelled && setData(res))
-      .catch((err) => !cancelled && setError(err.message || "Failed to load product profitability"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
-  }, [tokenId, accountIds, since, until, refreshKey]);
-
-  if (loading && !data) return <SkeletonBlock />;
+  if (loading) return <SkeletonBlock />;
   if (error) return <ErrorState message={error} />;
   if (!data) return null;
 
+  // Phase 18 §6 — this endpoint now matches via the same shared
+  // variantId -> sku -> productId -> name tiers every other Profitability
+  // endpoint uses (see server/routes/profitability.js resolveProductConfig),
+  // so "Matched Via" is shown for transparency and rows are keyed by the
+  // matched Product's own id (productDocId) rather than sku, since a
+  // product matched only via Variant ID/Product ID may have no sku at all.
+  const MATCH_LABELS = { variantId: "Variant ID", sku: "SKU", productId: "Product ID", name: "Name" };
   const columns = [
     { key: "name", label: "Product", render: (p) => <span className="font-medium text-slate-700">{p.name}</span> },
-    { key: "sku", label: "SKU", render: (p) => p.sku || <span className="text-slate-400 italic">Unmatched</span> },
+    { key: "sku", label: "SKU", render: (p) => p.sku || <span className="text-slate-400 italic">—</span> },
+    {
+      key: "matchedVia",
+      label: "Matched Via",
+      render: (p) => (p.matchedVia ? <span className="badge badge-blue text-[10px]">{MATCH_LABELS[p.matchedVia] || p.matchedVia}</span> : <span className="badge badge-slate text-[10px]">Unmapped</span>),
+    },
     { key: "units", label: "Units Sold", render: (p) => fmtNumber(p.units) },
     { key: "productCost", label: "Product Cost", render: (p) => currency(p.productCost) },
     { key: "packagingCost", label: "Packaging", render: (p) => currency(p.packagingCost) },
@@ -680,13 +1022,16 @@ function ProductsTab({ tokenId, accountIds, since, until, refreshKey }) {
 
   return (
     <div className="space-y-4">
-      <p className="text-[11px] text-slate-400">Units sold and cost breakdown per product/SKU across every order in this range. Configure product costs on the Products page.</p>
+      <div className="flex justify-end -mb-2">
+        <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+      </div>
+      <p className="text-[11px] text-slate-400">Units sold and cost breakdown per product across every order in this range (matched by Variant ID, then SKU, then Product ID, then product name). Configure product costs on the Products page.</p>
       <DataTable
         tableId="profit-products"
         columns={columns}
         data={data.products}
         searchKeys={["name", "sku"]}
-        rowKey={(p) => p.sku || "unmatched"}
+        rowKey={(p) => p.productDocId || "unmapped"}
         exportFilename="product-profitability.csv"
         emptyMessage="No product line items found in this range."
       />
@@ -740,6 +1085,21 @@ export default function ProfitabilityPage() {
   const [codRate, setCodRate] = useState(70);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Phase 18 §4 — HALUCINATE scenario state. 100% local React state, never
+  // sent anywhere (see lib/scenarioMath.js for the full design rationale).
+  // Phase 19 §3.5 — lifted here (was local to OverviewTab) so it survives
+  // switching tabs and can be shared by CampaignsTab/DailyTab, which now
+  // also recompute their own numbers under the same scenario.
+  const [scenario, setScenario] = useState(emptyScenario);
+  const scenarioActive = isScenarioActive(scenario);
+  const resetScenario = () => setScenario(emptyScenario);
+  // Reset scenario whenever the underlying range/accounts/token change — a
+  // scenario built against one date range/account selection shouldn't
+  // silently keep applying once the actual numbers underneath it change.
+  useEffect(() => {
+    setScenario(emptyScenario);
+  }, [TOKEN_ID, since, until, JSON.stringify(selectedAccounts)]);
+
   useEffect(() => {
     fetchProfitSettings()
       .then((res) => setCodRate(res.codSuccessRate))
@@ -778,10 +1138,29 @@ export default function ProfitabilityPage() {
     setPresetKey(key);
   };
 
-  const activeProps = { tokenId: TOKEN_ID, accountIds: selectedAccounts, since, until, refreshKey };
+  const activeProps = {
+    tokenId: TOKEN_ID,
+    accountIds: selectedAccounts,
+    since,
+    until,
+    refreshKey,
+    // Phase 19 §3.5 — shared HALUCINATE scenario state, so Campaigns/Daily
+    // (and Overview, which owns the input panel) all read the exact same
+    // overrides. Tabs that don't use scenarios (COD vs Prepaid, Product
+    // Profitability) simply ignore these extra props.
+    scenario,
+    setScenario,
+    scenarioActive,
+    resetScenario,
+  };
 
   return (
     <div className="min-h-screen pb-16">
+      {/* Phase 19 §3.5 — injected ONCE here (always mounted regardless of
+          active tab) so the halucinate-* classes are available to
+          Campaigns/Daily's HalucinateTabBanner even when Overview (which
+          also injects its own copy via HalucinatePanel) isn't mounted. */}
+      <style>{HALUCINATE_CSS}</style>
       <div className="sticky top-0 z-20 bg-white/85 backdrop-blur-md border-b border-slate-200">
         <div className="max-w-[1600px] mx-auto px-6 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3.5">

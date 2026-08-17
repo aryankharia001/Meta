@@ -24,6 +24,12 @@ export function setCachedExplorerList(tokenId, accountIds, since, until, data) {
   listCache.set(listKey(tokenId, accountIds, since, until), data);
 }
 
+// Phase 18 (part 2) — exported so the new useSwr hook can build the same
+// string it uses internally as this list's cache key, without a second,
+// possibly-drifting copy of this format living in the page. Purely
+// additive — every existing caller above is untouched.
+export const explorerListCacheKey = listKey;
+
 export function getCachedCampaignBreakdown(tokenId, campaignId, since, until) {
   return breakdownCache.get(breakdownKey(tokenId, campaignId, since, until)) || null;
 }

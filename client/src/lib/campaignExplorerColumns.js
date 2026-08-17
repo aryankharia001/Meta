@@ -63,7 +63,10 @@ export const COLUMN_GROUPS = [
       { key: "unmatchedOrders", label: "Unmatched Orders", defaultWidth: 140, align: "right", render: (c) => number(c.unmatchedOrders) },
       { key: "outsideRangeOrders", label: "Outside Range", defaultWidth: 130, align: "right", render: (c) => number(c.outsideRangeOrders) },
       { key: "revenue", label: "Revenue", defaultWidth: 110, align: "right", render: (c) => currency(c.revenue) },
-      { key: "profit", label: "Profit", defaultWidth: 110, align: "right", render: (c) => currency(c.profit) },
+      // Phase 19 §4 — relabeled "Profit" → "Gross Profit" (Revenue − Ad
+      // Spend only), disambiguating from Profitability's real Net Profit.
+      // `c.profit`'s underlying value/math is untouched.
+      { key: "profit", label: "Gross Profit", defaultWidth: 110, align: "right", render: (c) => currency(c.profit) },
       { key: "aov", label: "Avg Order Value", defaultWidth: 130, align: "right", render: (c) => currency(c.aov) },
       { key: "costPerOrder", label: "Cost / Order", defaultWidth: 120, align: "right", render: (c) => currency(c.costPerOrder) },
       { key: "revenuePerOrder", label: "Revenue / Order", defaultWidth: 130, align: "right", render: (c) => currency(c.revenuePerOrder) },

@@ -1,8 +1,15 @@
-import { useEffect, useState } from "react";
-import { Wallet, Plus, Loader2, Pencil, Trash2, AlertTriangle, X, Ban, CheckCircle2 } from "lucide-react";
+import { useState } from "react";
+import { Wallet, Plus, Loader2, Pencil, Trash2, AlertTriangle, X, Ban, CheckCircle2, RefreshCw } from "lucide-react";
 import { fetchExpenses, createExpense, updateExpense, deleteExpense } from "../lib/api";
 import { currency as formatCurrency, formatDate } from "../lib/format";
 import DataTable from "../components/DataTable";
+import { getCachedExpenses, setCachedExpenses, EXPENSES_CACHE_KEY } from "../lib/expensesCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
+
+// Phase 18 (part 2) — same "config page, not a fast-moving analytics
+// view" reasoning as productsCache.js.
+const EXPENSES_STALE_MS = 5 * 60 * 1000;
 
 // ────────────────────────────────────────────────────────────────
 // Phase 16 §7/§8/§9/§19 — Operating Expenses. Entirely new, additive
@@ -183,32 +190,35 @@ function EditExpenseModal({ expense, onClose, onSaved }) {
 }
 
 export default function ExpensesPage() {
-  const [expenses, setExpenses] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [busyId, setBusyId] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
 
-  const load = () => {
-    setLoading(true);
-    setError("");
-    fetchExpenses()
-      .then((res) => setExpenses(res.expenses || []))
-      .catch((err) => setError(err.message || "Failed to load expenses"))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
+  // Phase 18 (part 2) — real SWR, replacing the old
+  // useState+useEffect+fetchExpenses().then(setExpenses) pattern.
+  const {
+    data: expensesData,
+    loading,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+    mutate,
+  } = useSwrFetch(EXPENSES_CACHE_KEY, () => fetchExpenses().then((res) => res.expenses || []), {
+    staleTimeMs: EXPENSES_STALE_MS,
+    getCached: getCachedExpenses,
+    setCached: setCachedExpenses,
+  });
+  const expenses = expensesData || [];
 
   const handleToggleActive = async (x) => {
     setBusyId(x.id);
     try {
       const res = await updateExpense(x.id, { active: !x.active });
-      setExpenses((prev) => prev.map((e) => (e.id === x.id ? res.expense : e)));
+      mutate((prev) => (prev || []).map((e) => (e.id === x.id ? res.expense : e)));
     } catch (err) {
-      setError(err.message || "Failed to update expense");
+      setActionError(err.message || "Failed to update expense");
     } finally {
       setBusyId(null);
     }
@@ -219,9 +229,9 @@ export default function ExpensesPage() {
     setBusyId(x.id);
     try {
       await deleteExpense(x.id);
-      setExpenses((prev) => prev.filter((e) => e.id !== x.id));
+      mutate((prev) => (prev || []).filter((e) => e.id !== x.id));
     } catch (err) {
-      setError(err.message || "Failed to delete expense");
+      setActionError(err.message || "Failed to delete expense");
     } finally {
       setBusyId(null);
     }
@@ -282,23 +292,31 @@ export default function ExpensesPage() {
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
-      <div className="flex items-center gap-2.5">
-        <span className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 text-white shadow-md shadow-amber-500/30">
-          <Wallet size={18} />
-        </span>
-        <div>
-          <h1 className="text-lg font-display font-bold text-slate-800 leading-tight">Operating Expenses</h1>
-          <p className="text-xs text-slate-400">
-            {loading ? "Loading…" : `${expenses.filter((e) => e.active).length} active · ~${formatCurrency(totalDaily)}/day today`}
-          </p>
+      <div className="flex items-center justify-between gap-2.5 flex-wrap">
+        <div className="flex items-center gap-2.5">
+          <span className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 text-white shadow-md shadow-amber-500/30">
+            <Wallet size={18} />
+          </span>
+          <div>
+            <h1 className="text-lg font-display font-bold text-slate-800 leading-tight">Operating Expenses</h1>
+            <p className="text-xs text-slate-400">
+              {loading ? "Loading…" : `${expenses.filter((e) => e.active).length} active · ~${formatCurrency(totalDaily)}/day today`}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2.5">
+          <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+          <button type="button" className="btn btn-secondary btn-sm" onClick={refresh} disabled={isValidating}>
+            <RefreshCw size={13} className={isValidating ? "animate-spin" : ""} /> Refresh
+          </button>
         </div>
       </div>
 
-      <AddExpenseForm onAdded={(x) => setExpenses((prev) => [x, ...prev])} />
+      <AddExpenseForm onAdded={(x) => mutate((prev) => [x, ...(prev || [])])} />
 
-      {error && (
+      {(actionError || error) && (
         <div className="flex items-center gap-1.5 text-xs text-rose-600">
-          <AlertTriangle size={12} /> {error}
+          <AlertTriangle size={12} /> {actionError || error}
         </div>
       )}
 
@@ -324,7 +342,7 @@ export default function ExpensesPage() {
           expense={editTarget}
           onClose={() => setEditTarget(null)}
           onSaved={(x) => {
-            setExpenses((prev) => prev.map((e) => (e.id === x.id ? x : e)));
+            mutate((prev) => (prev || []).map((e) => (e.id === x.id ? x : e)));
             setEditTarget(null);
           }}
         />

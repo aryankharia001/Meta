@@ -106,10 +106,14 @@ export default function CampaignSection({ campaignData, tokenId, since, until })
         <Leaderboard title="Highest ROAS Campaigns" columns={columns("ROAS")} rows={boards.byRoasHigh} renderRow={row("roas", multiplier)} />
         <Leaderboard title="Lowest ROAS Campaigns" tip="Campaigns with at least one order, sorted worst-ROAS first." columns={columns("ROAS")} rows={boards.byRoasLow} renderRow={row("roas", multiplier)} />
         <Leaderboard title="Highest Spend Campaigns" columns={columns("Spend")} rows={boards.bySpend} renderRow={row("spend", currency)} />
+        {/* Phase 19 §4 — column relabeled "Profit" → "Gross Profit" (still
+            revenue − spend only, per the tip below) to disambiguate from
+            Profitability's real Net Profit — same naming-collision fix
+            applied everywhere else this rev-minus-spend figure is shown. */}
         <Leaderboard
           title="Lowest Performing Campaigns"
-          tip="Sorted by profit (revenue − spend), worst first — the campaigns actually losing money, not just low ROAS."
-          columns={columns("Profit")}
+          tip="Sorted by gross profit (revenue − spend), worst first — the campaigns actually losing money on ad spend, not just low ROAS. Doesn't include product/packaging/shipping/operating costs — see Profitability for full Net Profit."
+          columns={columns("Gross Profit")}
           rows={boards.lowestPerforming}
           renderRow={row("profit", currency)}
         />

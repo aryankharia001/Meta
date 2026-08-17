@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, Building2, ChevronDown, RefreshCw, AlertTriangle, LayoutList, Columns3 } from "lucide-react";
 import { fetchLiveAdAccounts, fetchDailyReport } from "../lib/api";
+import { getCachedDailyReport, setCachedDailyReport, dailyReportCacheKey } from "../lib/dailyReportCache";
+import { useSwrFetch } from "../lib/useSwr";
+import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import { todayIso, shiftDays } from "../lib/dateIst";
 import DailyTable from "../components/daily/DailyTable";
@@ -53,11 +56,6 @@ export default function DailyPage() {
     return PRESETS.find((p) => p.key === presetKey).range();
   }, [presetKey, customSince, customUntil]);
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [lastFetchedAt, setLastFetchedAt] = useState(null);
-
   const [drawerMeta, setDrawerMeta] = useState(null);
   // Phase 15 §1/§13 — separate from drawerMeta above (which is scoped to
   // one campaign+date, opened from a campaign row inside an expanded
@@ -74,6 +72,37 @@ export default function DailyPage() {
   // dailyReports.js), so no extra fetch is needed just to list them.
   const [selectedCampaignKeys, setSelectedCampaignKeys] = useState(new Set());
   const [viewMode, setViewMode] = useState("table"); // "table" | "compare"
+
+  // Phase 19 §1 — this SWR fetch (which defines `data`) must be declared
+  // BEFORE any hook below that closes over `data` (campaignOptions'
+  // useMemo, the "drop stale campaign selection" effect, filteredDays,
+  // filteredTotals). It used to sit further down this file, after those
+  // hooks — since `data` is declared with `const` here, every earlier
+  // reference to it in the same component body was in the temporal dead
+  // zone, throwing "Cannot access 'data' before initialization" (minified
+  // to a single letter in the built bundle) on every render. Moving the
+  // declaration up fixes the crash; nothing about what's fetched or how
+  // it's cached changed.
+  //
+  // Phase 18 (part 2) — real SWR. Daily reports move at day-granularity
+  // (they don't change minute-to-minute the way "today"'s live orders
+  // do), so a longer stale window than Dashboard/Explorer is appropriate
+  // — 2 minutes.
+  const dailyKey =
+    TOKEN_ID && selectedAccounts.length > 0 ? dailyReportCacheKey(TOKEN_ID, selectedAccounts, since, until) : null;
+  const {
+    data,
+    loading,
+    isValidating,
+    error,
+    backgroundError,
+    lastUpdatedAt,
+    refresh,
+  } = useSwrFetch(dailyKey, () => fetchDailyReport(TOKEN_ID, { accountIds: selectedAccounts, since, until }), {
+    staleTimeMs: 120000,
+    getCached: () => getCachedDailyReport(TOKEN_ID, selectedAccounts, since, until),
+    setCached: (d) => setCachedDailyReport(TOKEN_ID, selectedAccounts, since, until, d),
+  });
 
   const campaignOptions = useMemo(() => {
     if (!data) return [];
@@ -156,24 +185,6 @@ export default function DailyPage() {
     };
   }, [TOKEN_ID]);
 
-  const load = () => {
-    if (!TOKEN_ID || selectedAccounts.length === 0) return;
-    setLoading(true);
-    setError("");
-    fetchDailyReport(TOKEN_ID, { accountIds: selectedAccounts, since, until })
-      .then((res) => {
-        setData(res);
-        setLastFetchedAt(new Date());
-      })
-      .catch((err) => setError(err.message || "Failed to load the daily report"))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [TOKEN_ID, selectedAccounts, since, until]);
-
   const handlePresetClick = (key) => {
     if (key === "custom") {
       setCustomSince(since);
@@ -217,12 +228,10 @@ export default function DailyPage() {
             </div>
 
             <div className="flex items-center gap-2.5">
-              {lastFetchedAt && (
-                <span className="text-xs text-slate-400">Updated {lastFetchedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-              )}
-              <button className="btn btn-secondary btn-sm" onClick={load} disabled={loading}>
-                <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-                {loading ? "Loading…" : "Refresh"}
+              <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
+              <button className="btn btn-secondary btn-sm" onClick={refresh} disabled={isValidating}>
+                <RefreshCw size={14} className={isValidating ? "animate-spin" : ""} />
+                {isValidating ? "Loading…" : "Refresh"}
               </button>
             </div>
           </div>
@@ -312,7 +321,7 @@ export default function DailyPage() {
       </div>
 
       <div className="max-w-[1600px] mx-auto px-6 pt-6">
-        {error && <ErrorState message={error} onRetry={load} />}
+        {error && <ErrorState message={error} onRetry={refresh} />}
 
         {!error && loading && !data && <SkeletonBlock />}
 

@@ -104,7 +104,12 @@ const POPUP_CONFIG = {
 
   revenue: { mode: "campaignFinance", title: "Revenue by Campaign", sortKey: "revenue" },
   spend: { mode: "campaignFinance", title: "Spend by Campaign", sortKey: "spend" },
-  profit: { mode: "campaignFinance", title: "Profit by Campaign", sortKey: "profit" },
+  // Phase 19 §4 — relabeled "Profit by Campaign" → "Gross Profit by
+  // Campaign" (still Revenue − Ad Spend, computed a few lines down at
+  // `profit: Number(c.revenue||0) - Number(c.spend||0)`) so this popup —
+  // opened from Dashboard's now-relabeled "Gross Profit" card — never
+  // reads as the same figure as Profitability's real Net Profit.
+  profit: { mode: "campaignFinance", title: "Gross Profit by Campaign", sortKey: "profit" },
   roas: { mode: "campaignFinance", title: "ROAS by Campaign", sortKey: "roas" },
   activeCampaigns: { mode: "campaignFinance", title: "Active Campaigns", sortKey: "spend" },
 
@@ -517,7 +522,7 @@ function CampaignFinanceView({ rows, tokenId, since, until, sortKeyDefault, titl
 
   const handleExport = () => {
     const csvRows = [
-      ["Campaign", "Spend", "Revenue", "Orders", "Avg Order Value", "ROAS", "Profit"],
+      ["Campaign", "Spend", "Revenue", "Orders", "Avg Order Value", "ROAS", "Gross Profit"],
       ...sorted.map((r) => [r.campaignName, r.spend, r.revenue, r.orderCount, r.aov.toFixed(2), r.roas.toFixed(2), r.profit]),
     ];
     downloadCsv(`${title.toLowerCase().replace(/\s+/g, "-")}.csv`, csvRows);
@@ -577,7 +582,7 @@ function CampaignFinanceView({ rows, tokenId, since, until, sortKeyDefault, titl
                       ROAS{arrow("roas")}
                     </th>
                     <th className="num cursor-pointer select-none" onClick={() => handleSort("profit")}>
-                      Profit{arrow("profit")}
+                      Gross Profit{arrow("profit")}
                     </th>
                   </tr>
                 </thead>
