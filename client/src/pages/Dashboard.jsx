@@ -387,13 +387,15 @@ export default function Dashboard() {
     return [...fromCampaigns, ...(data.unmatchedOrders || [])];
   }, [data]);
 
+  const SPEND_GST_RATE = 0.18;
+  
   const cardValues = useMemo(() => {
     if (!data) return {};
     const totalOrders = data.summary.totalOrders || 0;
     const unmatchedCount = data.unmatchedOrders?.length || 0;
     const matchedOrders = Math.max(totalOrders - unmatchedCount, 0);
     const revenue = data.summary.totalRevenue || 0;
-    const spend = data.summary.totalSpend || 0;
+    const spend = (data.summary.totalSpend || 0) * (1 + SPEND_GST_RATE);
     const roas = data.summary.averageROAS || 0;
     const prepaid = allOrders.filter((o) => o.paymentType === "PREPAID").length;
     const cod = allOrders.filter((o) => o.paymentType === "CASH_ON_DELIVERY").length;
