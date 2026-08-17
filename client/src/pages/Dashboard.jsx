@@ -125,6 +125,20 @@ const currency = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const number = (n) => Number(n || 0).toLocaleString("en-IN");
 
+// Small dedicated client for the new order-costs endpoint (kept local to
+// this file rather than added into ../lib/api since I don't have that
+// file's contents to match its conventions — move it there if you'd like
+// it alongside fetchLiveAdAccounts/fetchLiveCampaigns).
+// Expects the backend to return a flat JSON object with manufacturing /
+// shipping / packaging (misc is intentionally ignored — that field stays
+// a manual input in the UI, see Dashboard()'s miscCost state).
+async function fetchOrderCosts() {
+  const res = await fetch("/api/order-costs", { credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to load order costs (HTTP ${res.status})`);
+  const json = await res.json();
+  return json?.costs || json;
+}
+
 const ACCENTS = {
   indigo: "bg-indigo-50 text-indigo-600",
   violet: "bg-violet-50 text-violet-600",
@@ -215,7 +229,7 @@ export default function Dashboard() {
   const [expandedCampaign, setExpandedCampaign] = useState(null);
   const [sortConfig, setSortConfig] = useState({ key: "spend", direction: "desc" });
 
-  // ── Profit inputs (new) ──────────────────────────────────────
+  // ── Profit inputs ─────────────────────────────────────────────
   // COD orders show up as "revenue" the moment they're placed, but a
   // real chunk of them never actually get delivered/collected (RTO,
   // cancelled in transit, etc.). codSuccessRate is a user-editable
@@ -232,28 +246,53 @@ export default function Dashboard() {
     localStorage.setItem("dashboardCodSuccessRate", String(codSuccessRate));
   }, [codSuccessRate]);
 
-  // Per-order cost inputs (manufacturing / shipping / packaging / misc),
-  // also user-editable and persisted. Each is a flat ₹ amount charged
-  // once per order, multiplied by total order count in cardValues below.
-  const [perOrderCosts, setPerOrderCosts] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("dashboardPerOrderCosts"));
-      return {
-        manufacturing: Number(saved?.manufacturing) || 0,
-        shipping: Number(saved?.shipping) || 0,
-        packaging: Number(saved?.packaging) || 0,
-        misc: Number(saved?.misc) || 0,
-      };
-    } catch {
-      return { manufacturing: 0, shipping: 0, packaging: 0, misc: 0 };
-    }
+  // Manufacturing / shipping / packaging are now read-only, sourced from
+  // the DB via GET /api/order-costs (see fetchOrderCosts below and the
+  // backend scaffold shared alongside this file — the collection/field
+  // names there are placeholders until wired to your actual document).
+  // Fetched once on mount since it's a single shared config document,
+  // not scoped per token/date-range.
+  const [dbCosts, setDbCosts] = useState({ manufacturing: 0, shipping: 0, packaging: 0 });
+  const [dbCostsLoading, setDbCostsLoading] = useState(false);
+  const [dbCostsError, setDbCostsError] = useState(null);
+
+  const loadDbCosts = () => {
+    let cancelled = false;
+    setDbCostsLoading(true);
+    setDbCostsError(null);
+    fetchOrderCosts()
+      .then((costs) => {
+        if (cancelled) return;
+        setDbCosts({
+          manufacturing: Number(costs?.manufacturing) || 0,
+          shipping: Number(costs?.shipping) || 0,
+          packaging: Number(costs?.packaging) || 0,
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) setDbCostsError(err?.message || "Failed to load order costs");
+      })
+      .finally(() => {
+        if (!cancelled) setDbCostsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  };
+  useEffect(() => loadDbCosts(), []);
+
+  // Misc cost is the one field left as a manual, editable input — same
+  // behavior as before, persisted locally.
+  const [miscCost, setMiscCost] = useState(() => {
+    const saved = Number(localStorage.getItem("dashboardMiscCostPerOrder"));
+    return Number.isFinite(saved) && saved >= 0 ? saved : 0;
   });
   useEffect(() => {
-    localStorage.setItem("dashboardPerOrderCosts", JSON.stringify(perOrderCosts));
-  }, [perOrderCosts]);
-  const updatePerOrderCost = (field, value) => {
+    localStorage.setItem("dashboardMiscCostPerOrder", String(miscCost));
+  }, [miscCost]);
+  const updateMiscCost = (value) => {
     const v = Number(value);
-    setPerOrderCosts((prev) => ({ ...prev, [field]: Number.isFinite(v) && v >= 0 ? v : 0 }));
+    setMiscCost(Number.isFinite(v) && v >= 0 ? v : 0);
   };
 
   // Phase 7 — Saved Views snapshot/restore. Deliberately a plain object
@@ -367,16 +406,17 @@ export default function Dashboard() {
       .reduce((sum, o) => sum + Number(o.totalAmountPayable || 0), 0);
     const codRevenueLoss = codRevenueRaw * (1 - codSuccessRate / 100);
 
-    // Flat per-order costs (manufacturing + shipping + packaging + misc),
+    // Flat per-order costs (manufacturing + shipping + packaging come
+    // from the DB via dbCosts; misc is the one manually-entered field),
     // applied to every order in the range — matched, unmatched, and
     // regardless of outcome, since manufacturing/shipping/packaging spend
     // is typically committed as soon as an order ships, not only on
     // orders that end up delivered.
     const perOrderCostTotal =
-      (Number(perOrderCosts.manufacturing) || 0) +
-      (Number(perOrderCosts.shipping) || 0) +
-      (Number(perOrderCosts.packaging) || 0) +
-      (Number(perOrderCosts.misc) || 0);
+      (Number(dbCosts.manufacturing) || 0) +
+      (Number(dbCosts.shipping) || 0) +
+      (Number(dbCosts.packaging) || 0) +
+      (Number(miscCost) || 0);
     const totalPerOrderCosts = perOrderCostTotal * totalOrders;
 
     const profit = revenue - codRevenueLoss - spend - totalPerOrderCosts;
@@ -402,7 +442,7 @@ export default function Dashboard() {
       cod,
       activeCampaigns: data.summary.totalCampaigns || 0,
     };
-  }, [data, allOrders, codSuccessRate, perOrderCosts]);
+  }, [data, allOrders, codSuccessRate, dbCosts, miscCost]);
 
   const cardList = useMemo(
     () =>
@@ -654,8 +694,12 @@ export default function Dashboard() {
                       {...c}
                       pinned={pinned}
                       wide={wide}
-                      perOrderCosts={perOrderCosts}
-                      onCostChange={updatePerOrderCost}
+                      dbCosts={dbCosts}
+                      dbCostsLoading={dbCostsLoading}
+                      dbCostsError={dbCostsError}
+                      onRetryDbCosts={loadDbCosts}
+                      miscCost={miscCost}
+                      onMiscChange={updateMiscCost}
                       breakdown={cardValues.profitBreakdown}
                       onClick={onClick}
                     />
@@ -1005,11 +1049,26 @@ function CodOrdersCard({ label, icon: Icon, accent, display, pinned, wide, codSu
   );
 }
 
-// Gross Profit card — adds a collapsible "dropdown" of editable
-// per-order cost inputs (manufacturing / shipping / packaging / misc)
-// plus a short breakdown of what got deducted. The chevron toggles the
-// panel open/closed without triggering the analytics popup.
-function ProfitCard({ label, icon: Icon, accent, display, pinned, wide, perOrderCosts, onCostChange, breakdown, onClick }) {
+// Gross Profit card — the dropdown now shows manufacturing / shipping /
+// packaging as read-only values pulled from the DB (fetchOrderCosts),
+// with a loading/error state and a retry link. Misc stays the one
+// editable input, same as before.
+function ProfitCard({
+  label,
+  icon: Icon,
+  accent,
+  display,
+  pinned,
+  wide,
+  dbCosts,
+  dbCostsLoading,
+  dbCostsError,
+  onRetryDbCosts,
+  miscCost,
+  onMiscChange,
+  breakdown,
+  onClick,
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -1030,7 +1089,7 @@ function ProfitCard({ label, icon: Icon, accent, display, pinned, wide, perOrder
           type="button"
           onClick={() => setOpen((o) => !o)}
           className="text-slate-400 hover:text-slate-600 p-0.5 -m-0.5"
-          title="Set per-order costs"
+          title="View per-order costs"
         >
           <ChevronDown size={15} className={`transition-transform ${open ? "rotate-180" : ""}`} />
         </button>
@@ -1043,10 +1102,24 @@ function ProfitCard({ label, icon: Icon, accent, display, pinned, wide, perOrder
 
       {open && (
         <div className="pt-2.5 mt-0.5 border-t border-slate-100 space-y-2" onClick={(e) => e.stopPropagation()}>
-          <CostInput label="Manufacturing / order" value={perOrderCosts.manufacturing} onChange={(v) => onCostChange("manufacturing", v)} />
-          <CostInput label="Shipping / order" value={perOrderCosts.shipping} onChange={(v) => onCostChange("shipping", v)} />
-          <CostInput label="Packaging / order" value={perOrderCosts.packaging} onChange={(v) => onCostChange("packaging", v)} />
-          <CostInput label="Misc / order" value={perOrderCosts.misc} onChange={(v) => onCostChange("misc", v)} />
+          {dbCostsLoading ? (
+            <div className="text-[11px] text-slate-400">Loading costs…</div>
+          ) : dbCostsError ? (
+            <div className="text-[11px] text-rose-500 flex items-center justify-between gap-2">
+              <span className="truncate">Couldn't load costs</span>
+              <button type="button" className="underline shrink-0" onClick={onRetryDbCosts}>
+                Retry
+              </button>
+            </div>
+          ) : (
+            <>
+              <CostRow label="Manufacturing / order" value={dbCosts.manufacturing} />
+              <CostRow label="Shipping / order" value={dbCosts.shipping} />
+              <CostRow label="Packaging / order" value={dbCosts.packaging} />
+            </>
+          )}
+
+          <CostInput label="Misc / order" value={miscCost} onChange={onMiscChange} />
 
           {breakdown && (
             <div className="text-[11px] text-slate-400 pt-1.5 mt-0.5 border-t border-slate-100 leading-relaxed">
@@ -1061,6 +1134,17 @@ function ProfitCard({ label, icon: Icon, accent, display, pinned, wide, perOrder
   );
 }
 
+// Read-only cost row (manufacturing/shipping/packaging — sourced from the DB).
+function CostRow({ label, value }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <label className="text-[11px] text-slate-400">{label}</label>
+      <span className="text-xs text-slate-600 font-medium">{currency(value)}</span>
+    </div>
+  );
+}
+
+// Editable cost row (misc — the one field left as manual input).
 function CostInput({ label, value, onChange }) {
   return (
     <div className="flex items-center justify-between gap-2">

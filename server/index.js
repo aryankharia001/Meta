@@ -42,6 +42,7 @@ import { bootstrapAdminFromEnv } from "./lib/bootstrapAdmin.js";
 
 import { connectDB } from "./config/db.js";
 import startShiprocketAutoSync from "./services/shiprocketCron.js";
+import orderCostsRouter from "./routes/orderCosts.js";
 
 dotenv.config();
 
@@ -87,7 +88,7 @@ app.use(cookieParser());
 app.use("/api/auth", authRouter);
 app.use("/api", requireAuth);
 app.use("/api/users", usersRouter);
-
+app.use("/api", orderCostsRouter);
 /* =========================================================
    API ROUTES
 ========================================================= */
