@@ -125,6 +125,26 @@ const currency = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const number = (n) => Number(n || 0).toLocaleString("en-IN");
 
+// Phase 21 — small shared hook for the batch of new manual, non-negative,
+// per-browser-persisted numeric inputs this phase adds (Abandoned Cart's
+// six fields + Additional Prepaid Revenue). Same read-from/write-to
+// localStorage pattern already used inline for codSuccessRate/miscCost
+// above, just factored out to avoid repeating it seven times.
+function usePersistedNumber(key, defaultValue) {
+  const [value, setValue] = useState(() => {
+    const saved = Number(localStorage.getItem(key));
+    return Number.isFinite(saved) && saved >= 0 ? saved : defaultValue;
+  });
+  useEffect(() => {
+    localStorage.setItem(key, String(value));
+  }, [key, value]);
+  const update = (v) => {
+    const n = Number(v);
+    setValue(Number.isFinite(n) && n >= 0 ? n : 0);
+  };
+  return [value, update];
+}
+
 // Small dedicated client for the new order-costs endpoint (kept local to
 // this file rather than added into ../lib/api since I don't have that
 // file's contents to match its conventions — move it there if you'd like
@@ -154,7 +174,16 @@ const CARD_DEFS = [
   { key: "matchedOrders", label: "Matched Orders", icon: CheckCircle2, accent: "emerald", format: number },
   { key: "unmatchedOrders", label: "Unmatched Orders", icon: XCircle, accent: "rose", format: number },
   { key: "outsideRange", label: "Outside Campaign Date Range", icon: CalendarX, accent: "slate", lazy: true },
+  // Phase 21 — headline stays the untouched Actual Order Revenue (same
+  // number ROAS/AOV already used); RevenueCard's dropdown adds the full
+  // Revenue Summary (Actual/Prepaid/Additional Prepaid/COD/Abandoned
+  // Cart/Total Gross Revenue) plus the manual Additional Prepaid Revenue
+  // and Abandoned Cart Orders inputs. See cardValues' revenueBreakdown.
   { key: "revenue", label: "Revenue", icon: Wallet, accent: "emerald", format: currency },
+  // Phase 21 §3 — headline stays the GST-inclusive spend figure that
+  // already fed Gross Profit; SpendCard's dropdown clearly itemizes
+  // Actual Spend / GST @ 18% / Total Spend incl. GST. Original Meta
+  // spend is unchanged, still available as spendBreakdown.actualSpend.
   { key: "spend", label: "Spend", icon: CreditCard, accent: "amber", format: currency },
   { key: "roas", label: "ROAS", icon: Gauge, accent: "violet", format: (v) => `${Number(v || 0).toFixed(2)}x` },
   // Phase 19 §4 — relabeled from "Profit" to "Gross Profit" to avoid
@@ -169,6 +198,11 @@ const CARD_DEFS = [
   // `profit`/`profitBreakdown` computation in cardValues below and the
   // ProfitCard component. This is still a dashboard-level *estimate*,
   // not a replacement for the Profitability page's audited Net Profit.
+  // Phase 21 — Revenue side of the formula is now Total Gross Revenue
+  // (Actual Order Revenue + Additional Prepaid Revenue + Abandoned Cart
+  // Revenue) and Abandoned Cart Expenses are also netted out; Spend is
+  // the GST-inclusive figure. Deliberately plain, direct arithmetic on
+  // the manual inputs — no HALUCINATE-style projection/simulation.
   { key: "profit", label: "Gross Profit", icon: PiggyBank, accent: "emerald", format: currency },
   { key: "aov", label: "Avg Order Value", icon: Receipt, accent: "sky", format: currency },
   { key: "prepaid", label: "Prepaid Orders", icon: CreditCard, accent: "indigo", format: number },
@@ -295,6 +329,40 @@ export default function Dashboard() {
     setMiscCost(Number.isFinite(v) && v >= 0 ? v : 0);
   };
 
+  // ── Phase 21 §1: Abandoned Cart Orders ──────────────────────────
+  // Fully manual, hypothetical order set — Abandoned Cart Revenue and
+  // Abandoned Cart Expenses are computed from these six inputs alone
+  // (see cardValues below) and are NEVER merged into allOrders,
+  // totalOrders, matchedOrders, unmatchedOrders, prepaid, or cod — i.e.
+  // abandoned carts never count as actual/COD/prepaid/delivered/matched
+  // orders, and none of the Meta↔Shiprocket sync/matching logic they
+  // read from is touched.
+  const [abandonedCartOrders, setAbandonedCartOrders] = usePersistedNumber("dashboardAbandonedCartOrders", 0);
+  const [abandonedCartAvgValue, setAbandonedCartAvgValue] = usePersistedNumber("dashboardAbandonedCartAvgValue", 0);
+  const [abandonedCartManufacturingCost, setAbandonedCartManufacturingCost] = usePersistedNumber(
+    "dashboardAbandonedCartManufacturingCost",
+    0
+  );
+  const [abandonedCartPackagingCost, setAbandonedCartPackagingCost] = usePersistedNumber(
+    "dashboardAbandonedCartPackagingCost",
+    0
+  );
+  const [abandonedCartShippingCost, setAbandonedCartShippingCost] = usePersistedNumber(
+    "dashboardAbandonedCartShippingCost",
+    0
+  );
+  const [abandonedCartMiscCost, setAbandonedCartMiscCost] = usePersistedNumber("dashboardAbandonedCartMiscCost", 0);
+
+  // ── Phase 21 §2: Additional Prepaid Revenue ─────────────────────
+  // A manual top-up added on top of the real Prepaid Revenue computed
+  // from allOrders. Flows into Revenue/Profit/Profit Margin (cardValues
+  // below) but — like Abandoned Cart Orders above — never touches the
+  // `prepaid` order count or any order/campaign matching logic.
+  const [additionalPrepaidRevenue, setAdditionalPrepaidRevenue] = usePersistedNumber(
+    "dashboardAdditionalPrepaidRevenue",
+    0
+  );
+
   // Phase 7 — Saved Views snapshot/restore. Deliberately a plain object
   // of already-existing state, not a new source of truth — restoring a
   // view just calls the same setters the filter bar's own controls use.
@@ -388,14 +456,24 @@ export default function Dashboard() {
   }, [data]);
 
   const SPEND_GST_RATE = 0.18;
-  
+
   const cardValues = useMemo(() => {
     if (!data) return {};
     const totalOrders = data.summary.totalOrders || 0;
     const unmatchedCount = data.unmatchedOrders?.length || 0;
     const matchedOrders = Math.max(totalOrders - unmatchedCount, 0);
+    // Actual Order Revenue — sum of real, Shiprocket-matched/unmatched
+    // orders only, exactly as before. Untouched by anything in Phase 21.
     const revenue = data.summary.totalRevenue || 0;
-    const spend = (data.summary.totalSpend || 0) * (1 + SPEND_GST_RATE);
+
+    // Phase 21 §3 — 18% GST on Spend. `actualSpend` is the untouched,
+    // original Meta spend figure; `spend` (GST-inclusive) is what already
+    // fed the profit calculation below before this phase, so profitability
+    // math is unchanged — it's just now also exposed as three clearly
+    // labeled pieces (see spendBreakdown) instead of a single opaque number.
+    const actualSpend = data.summary.totalSpend || 0;
+    const spendGst = actualSpend * SPEND_GST_RATE;
+    const spend = actualSpend + spendGst; // Spend Including GST
     const roas = data.summary.averageROAS || 0;
     const prepaid = allOrders.filter((o) => o.paymentType === "PREPAID").length;
     const cod = allOrders.filter((o) => o.paymentType === "CASH_ON_DELIVERY").length;
@@ -403,17 +481,45 @@ export default function Dashboard() {
     // Revenue attributable to COD orders, at face value (before the
     // success-rate haircut). The "Revenue" card keeps showing the raw
     // `revenue` total untouched — this discount only feeds into profit.
-    const codRevenueRaw = allOrders
+    const codRevenueActual = allOrders
       .filter((o) => o.paymentType === "CASH_ON_DELIVERY")
       .reduce((sum, o) => sum + Number(o.totalAmountPayable || 0), 0);
-    const codRevenueLoss = codRevenueRaw * (1 - codSuccessRate / 100);
+    const codRevenueLoss = codRevenueActual * (1 - codSuccessRate / 100);
+
+    // Revenue attributable to real Prepaid orders, at face value — the
+    // COD counterpart above. Phase 21 §2's Additional Prepaid Revenue is
+    // a separate manual top-up added on top of this, never mixed into it
+    // or into the `prepaid` order count above.
+    const prepaidRevenueActual = allOrders
+      .filter((o) => o.paymentType === "PREPAID")
+      .reduce((sum, o) => sum + Number(o.totalAmountPayable || 0), 0);
+    const additionalPrepaid = Number(additionalPrepaidRevenue) || 0;
+    const totalPrepaidRevenue = prepaidRevenueActual + additionalPrepaid;
+
+    // Phase 21 §1 — Abandoned Cart Orders: a fully manual, hypothetical
+    // order set (see the state block above for why it never touches
+    // totalOrders/matchedOrders/prepaid/cod/allOrders).
+    const abandonedCartCostPerOrder =
+      (Number(abandonedCartManufacturingCost) || 0) +
+      (Number(abandonedCartPackagingCost) || 0) +
+      (Number(abandonedCartShippingCost) || 0) +
+      (Number(abandonedCartMiscCost) || 0);
+    const abandonedCartOrderCount = Number(abandonedCartOrders) || 0;
+    const abandonedCartRevenue = abandonedCartOrderCount * (Number(abandonedCartAvgValue) || 0);
+    const abandonedCartExpenses = abandonedCartOrderCount * abandonedCartCostPerOrder;
+    const abandonedCartContribution = abandonedCartRevenue - abandonedCartExpenses;
+
+    // Total Gross Revenue = Actual Order Revenue + Additional Prepaid
+    // Revenue (§2) + Abandoned Cart Revenue (§1).
+    const totalGrossRevenue = revenue + additionalPrepaid + abandonedCartRevenue;
 
     // Flat per-order costs (manufacturing + shipping + packaging come
     // from the DB via dbCosts; misc is the one manually-entered field),
-    // applied to every order in the range — matched, unmatched, and
+    // applied to every real order in the range — matched, unmatched, and
     // regardless of outcome, since manufacturing/shipping/packaging spend
     // is typically committed as soon as an order ships, not only on
-    // orders that end up delivered.
+    // orders that end up delivered. Abandoned Cart orders have their own
+    // separate cost inputs above and are intentionally excluded here.
     const perOrderCostTotal =
       (Number(dbCosts.manufacturing) || 0) +
       (Number(dbCosts.shipping) || 0) +
@@ -421,7 +527,11 @@ export default function Dashboard() {
       (Number(miscCost) || 0);
     const totalPerOrderCosts = perOrderCostTotal * totalOrders;
 
-    const profit = revenue - codRevenueLoss - spend - totalPerOrderCosts;
+    // Gross Profit now nets out of Total Gross Revenue (real + additional
+    // prepaid + abandoned cart), the COD-risk discount, GST-inclusive ad
+    // spend, real per-order costs, and Abandoned Cart Expenses.
+    const profit = totalGrossRevenue - codRevenueLoss - spend - totalPerOrderCosts - abandonedCartExpenses;
+    const profitMargin = totalGrossRevenue ? (profit / totalGrossRevenue) * 100 : 0;
 
     return {
       totalOrders,
@@ -433,18 +543,54 @@ export default function Dashboard() {
       profit,
       profitBreakdown: {
         revenue,
+        totalGrossRevenue,
         codRevenueLoss,
         spend,
+        actualSpend,
+        spendGst,
         perOrderCostTotal,
         totalPerOrderCosts,
         totalOrders,
+        additionalPrepaidRevenue: additionalPrepaid,
+        abandonedCartRevenue,
+        abandonedCartExpenses,
+        profitMargin,
+      },
+      revenueBreakdown: {
+        actualRevenue: revenue,
+        prepaidRevenueActual,
+        additionalPrepaidRevenue: additionalPrepaid,
+        totalPrepaidRevenue,
+        codRevenueActual,
+        abandonedCartRevenue,
+        abandonedCartExpenses,
+        abandonedCartContribution,
+        totalGrossRevenue,
+      },
+      spendBreakdown: {
+        actualSpend,
+        spendGst,
+        spendInclGst: spend,
       },
       aov: totalOrders ? revenue / totalOrders : 0,
       prepaid,
       cod,
       activeCampaigns: data.summary.totalCampaigns || 0,
     };
-  }, [data, allOrders, codSuccessRate, dbCosts, miscCost]);
+  }, [
+    data,
+    allOrders,
+    codSuccessRate,
+    dbCosts,
+    miscCost,
+    additionalPrepaidRevenue,
+    abandonedCartOrders,
+    abandonedCartAvgValue,
+    abandonedCartManufacturingCost,
+    abandonedCartPackagingCost,
+    abandonedCartShippingCost,
+    abandonedCartMiscCost,
+  ]);
 
   const cardList = useMemo(
     () =>
@@ -706,6 +852,35 @@ export default function Dashboard() {
                       onClick={onClick}
                     />
                   );
+                }
+                if (cardKey === "revenue") {
+                  return (
+                    <RevenueCard
+                      key={cardKey}
+                      {...c}
+                      pinned={pinned}
+                      wide={wide}
+                      breakdown={cardValues.revenueBreakdown}
+                      additionalPrepaidRevenue={additionalPrepaidRevenue}
+                      onAdditionalPrepaidRevenueChange={setAdditionalPrepaidRevenue}
+                      abandonedCartOrders={abandonedCartOrders}
+                      onAbandonedCartOrdersChange={setAbandonedCartOrders}
+                      abandonedCartAvgValue={abandonedCartAvgValue}
+                      onAbandonedCartAvgValueChange={setAbandonedCartAvgValue}
+                      abandonedCartManufacturingCost={abandonedCartManufacturingCost}
+                      onAbandonedCartManufacturingCostChange={setAbandonedCartManufacturingCost}
+                      abandonedCartPackagingCost={abandonedCartPackagingCost}
+                      onAbandonedCartPackagingCostChange={setAbandonedCartPackagingCost}
+                      abandonedCartShippingCost={abandonedCartShippingCost}
+                      onAbandonedCartShippingCostChange={setAbandonedCartShippingCost}
+                      abandonedCartMiscCost={abandonedCartMiscCost}
+                      onAbandonedCartMiscCostChange={setAbandonedCartMiscCost}
+                      onClick={onClick}
+                    />
+                  );
+                }
+                if (cardKey === "spend") {
+                  return <SpendCard key={cardKey} {...c} pinned={pinned} wide={wide} breakdown={cardValues.spendBreakdown} onClick={onClick} />;
                 }
                 return <KpiCard key={cardKey} {...c} pinned={pinned} wide={wide} onClick={onClick} />;
               })}
@@ -1042,7 +1217,7 @@ function CodOrdersCard({ label, icon: Icon, accent, display, pinned, wide, codSu
               const v = Number(e.target.value);
               onCodSuccessRateChange(Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0);
             }}
-            className="w-14 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-right focus:outline-none focus:ring-1 focus:ring-indigo-400"
+            className="w-14 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-left focus:outline-none focus:ring-1 focus:ring-indigo-400"
           />
           <span className="text-[11px] text-slate-400">%</span>
         </div>
@@ -1124,10 +1299,15 @@ function ProfitCard({
           <CostInput label="Misc / order" value={miscCost} onChange={onMiscChange} />
 
           {breakdown && (
-            <div className="text-[11px] text-slate-400 pt-1.5 mt-0.5 border-t border-slate-100 leading-relaxed">
-              Revenue {currency(breakdown.revenue)} − COD loss {currency(breakdown.codRevenueLoss)} − Spend{" "}
-              {currency(breakdown.spend)} − Costs {currency(breakdown.totalPerOrderCosts)} ({breakdown.totalOrders} orders ×{" "}
-              {currency(breakdown.perOrderCostTotal)})
+            <div className="text-[11px] text-slate-400 pt-1.5 mt-0.5 border-t border-slate-100 leading-relaxed space-y-1">
+              <div>
+                Total Gross Revenue {currency(breakdown.totalGrossRevenue)} (Actual {currency(breakdown.revenue)} + Additional
+                Prepaid {currency(breakdown.additionalPrepaidRevenue)} + Abandoned Cart {currency(breakdown.abandonedCartRevenue)})
+                − COD loss {currency(breakdown.codRevenueLoss)} − Spend incl. GST {currency(breakdown.spend)} − Order Costs{" "}
+                {currency(breakdown.totalPerOrderCosts)} ({breakdown.totalOrders} orders × {currency(breakdown.perOrderCostTotal)}) −
+                Abandoned Cart Expenses {currency(breakdown.abandonedCartExpenses)}
+              </div>
+              <div className="font-medium text-slate-500">Profit Margin {Number(breakdown.profitMargin || 0).toFixed(2)}%</div>
             </div>
           )}
         </div>
@@ -1159,9 +1339,192 @@ function CostInput({ label, value, onChange }) {
           step="0.01"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="w-16 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-right focus:outline-none focus:ring-1 focus:ring-indigo-400"
+          className="w-16 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-left focus:outline-none focus:ring-1 focus:ring-indigo-400"
         />
       </div>
+    </div>
+  );
+}
+
+// Read-only breakdown row shared by RevenueCard/SpendCard — a label plus a
+// currency value, optionally emphasized for rollup totals.
+function BreakdownRow({ label, value, strong }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <label className={`text-[11px] ${strong ? "text-slate-600 font-medium" : "text-slate-400"}`}>{label}</label>
+      <span className={`text-xs font-medium ${strong ? "text-slate-800" : "text-slate-600"}`}>{currency(value)}</span>
+    </div>
+  );
+}
+
+// Editable currency/number input row shared by RevenueCard's Abandoned
+// Cart + Additional Prepaid Revenue fields. Same visual language as the
+// Gross Profit card's CostInput above.
+function EditableRow({ label, value, onChange, prefix = "₹", step = "0.01" }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <label className="text-[11px] text-slate-400">{label}</label>
+      <div className="flex items-center gap-1">
+        {prefix && <span className="text-[11px] text-slate-400">{prefix}</span>}
+        <input
+          type="number"
+          min={0}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-20 text-xs border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-700 text-left focus:outline-none focus:ring-1 focus:ring-indigo-400"
+        />
+      </div>
+    </div>
+  );
+}
+
+// Revenue card — Phase 21 §1/§2/§4. Headline stays the untouched Actual
+// Order Revenue (same number that already fed ROAS/AOV elsewhere on this
+// page); the dropdown adds the full Revenue Summary breakdown plus the
+// manual inputs for Additional Prepaid Revenue and Abandoned Cart Orders.
+// All math lives in cardValues above — this component only displays it
+// and forwards input changes to the setters passed down from Dashboard().
+function RevenueCard({
+  label,
+  icon: Icon,
+  accent,
+  display,
+  pinned,
+  wide,
+  breakdown,
+  additionalPrepaidRevenue,
+  onAdditionalPrepaidRevenueChange,
+  abandonedCartOrders,
+  onAbandonedCartOrdersChange,
+  abandonedCartAvgValue,
+  onAbandonedCartAvgValueChange,
+  abandonedCartManufacturingCost,
+  onAbandonedCartManufacturingCostChange,
+  abandonedCartPackagingCost,
+  onAbandonedCartPackagingCostChange,
+  abandonedCartShippingCost,
+  onAbandonedCartShippingCostChange,
+  abandonedCartMiscCost,
+  onAbandonedCartMiscCostChange,
+  onClick,
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div
+      className={`group relative card !p-4 flex flex-col gap-3 ${pinned ? "!border-amber-300" : ""} ${
+        wide ? "col-span-2" : ""
+      }`}
+    >
+      {pinned && <Pin size={11} className="absolute top-3 right-3 text-amber-400" fill="currentColor" />}
+
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={onClick} title="View detailed analytics">
+          <span className={`flex items-center justify-center w-9 h-9 rounded-xl ${ACCENTS[accent]}`}>
+            <Icon size={17} />
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="text-slate-400 hover:text-slate-600 p-0.5 -m-0.5"
+          title="View revenue summary"
+        >
+          <ChevronDown size={15} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </div>
+
+      <button type="button" onClick={onClick} className="min-w-0 text-left" title="View detailed analytics">
+        <div className="text-[13px] text-slate-500 mb-0.5 leading-tight truncate">{label}</div>
+        <div className="text-xl font-display font-bold text-slate-800 truncate">{display ?? "—"}</div>
+        {breakdown && (
+          <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+            Total Gross Revenue {currency(breakdown.totalGrossRevenue)}
+          </div>
+        )}
+      </button>
+
+      {open && breakdown && (
+        <div className="pt-2.5 mt-0.5 border-t border-slate-100 space-y-2" onClick={(e) => e.stopPropagation()}>
+          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Revenue Summary</div>
+          <BreakdownRow label="Actual Revenue" value={breakdown.actualRevenue} />
+          <BreakdownRow label="Prepaid Revenue" value={breakdown.prepaidRevenueActual} />
+          <EditableRow
+            label="Additional Prepaid Revenue"
+            value={additionalPrepaidRevenue}
+            onChange={onAdditionalPrepaidRevenueChange}
+          />
+          <BreakdownRow label="Total Prepaid Revenue" value={breakdown.totalPrepaidRevenue} strong />
+          <BreakdownRow label="COD Revenue" value={breakdown.codRevenueActual} />
+          <BreakdownRow label="Abandoned Cart Revenue" value={breakdown.abandonedCartRevenue} />
+          <BreakdownRow label="Total Gross Revenue" value={breakdown.totalGrossRevenue} strong />
+
+          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide pt-2 mt-1 border-t border-slate-100">
+            Abandoned Cart Orders
+          </div>
+          <EditableRow label="Abandoned Cart Orders" value={abandonedCartOrders} onChange={onAbandonedCartOrdersChange} prefix="#" step="1" />
+          <EditableRow label="Avg. Abandoned Cart Order Value" value={abandonedCartAvgValue} onChange={onAbandonedCartAvgValueChange} />
+          <EditableRow
+            label="Manufacturing/Product Cost / Order"
+            value={abandonedCartManufacturingCost}
+            onChange={onAbandonedCartManufacturingCostChange}
+          />
+          <EditableRow label="Packaging Cost / Order" value={abandonedCartPackagingCost} onChange={onAbandonedCartPackagingCostChange} />
+          <EditableRow label="Shipping Cost / Order" value={abandonedCartShippingCost} onChange={onAbandonedCartShippingCostChange} />
+          <EditableRow label="Miscellaneous Cost / Order" value={abandonedCartMiscCost} onChange={onAbandonedCartMiscCostChange} />
+          <BreakdownRow label="Abandoned Cart Expenses" value={breakdown.abandonedCartExpenses} />
+          <BreakdownRow label="Final Revenue/Profit Contribution" value={breakdown.abandonedCartContribution} strong />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Spend card — Phase 21 §3. Headline stays the GST-inclusive spend figure
+// that already fed Gross Profit before this phase (Keep the original Meta
+// spend unchanged — it's still available, untouched, as `actualSpend`
+// inside the breakdown). The dropdown clearly itemizes all three values.
+function SpendCard({ label, icon: Icon, accent, display, pinned, wide, breakdown, onClick }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div
+      className={`group relative card !p-4 flex flex-col gap-3 ${pinned ? "!border-amber-300" : ""} ${
+        wide ? "col-span-2" : ""
+      }`}
+    >
+      {pinned && <Pin size={11} className="absolute top-3 right-3 text-amber-400" fill="currentColor" />}
+
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={onClick} title="View detailed analytics">
+          <span className={`flex items-center justify-center w-9 h-9 rounded-xl ${ACCENTS[accent]}`}>
+            <Icon size={17} />
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="text-slate-400 hover:text-slate-600 p-0.5 -m-0.5"
+          title="View spend breakdown"
+        >
+          <ChevronDown size={15} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </div>
+
+      <button type="button" onClick={onClick} className="min-w-0 text-left" title="View detailed analytics">
+        <div className="text-[13px] text-slate-500 mb-0.5 leading-tight truncate">{label}</div>
+        <div className="text-xl font-display font-bold text-slate-800 truncate">{display ?? "—"}</div>
+        {breakdown && <div className="text-[11px] text-slate-400 mt-0.5 truncate">incl. 18% GST</div>}
+      </button>
+
+      {open && breakdown && (
+        <div className="pt-2.5 mt-0.5 border-t border-slate-100 space-y-2" onClick={(e) => e.stopPropagation()}>
+          <BreakdownRow label="Actual Spend" value={breakdown.actualSpend} />
+          <BreakdownRow label="GST @ 18%" value={breakdown.spendGst} />
+          <BreakdownRow label="Total Spend incl. GST" value={breakdown.spendInclGst} strong />
+        </div>
+      )}
     </div>
   );
 }
