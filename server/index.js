@@ -33,6 +33,11 @@ import dailyHourlyRouter from "./routes/dailyHourly.js";
 import productsRouter from "./routes/products.js";
 import expensesRouter from "./routes/expenses.js";
 import profitabilityRouter from "./routes/profitability.js";
+// Phase 22 — Abandoned Cart Management. Entirely new, additive route
+// file; none of the imports/mounts here are touched. Never writes to
+// ShiprocketOrder or anything order/campaign matching reads from — see
+// routes/abandonedCarts.js's own header comment.
+import abandonedCartsRouter from "./routes/abandonedCarts.js";
 // Phase 14 — authentication + user management. Entirely new, additive
 // route files; everything above stays untouched.
 import authRouter from "./routes/auth.js";
@@ -120,6 +125,8 @@ app.use("/api/daily-hourly", dailyHourlyRouter);
 app.use("/api/products", productsRouter);
 app.use("/api/expenses", expensesRouter);
 app.use("/api/profitability", profitabilityRouter);
+// Phase 22 — additive only, alongside every route above.
+app.use("/api/abandoned-carts", abandonedCartsRouter);
 
 /* =========================================================
    SERVE REACT CLIENT

@@ -25,8 +25,11 @@ import {
   AlertTriangle,
   SlidersHorizontal,
   Pin,
+  ExternalLink,
+  Loader2,
 } from "lucide-react";
-import { fetchLiveAdAccounts, fetchLiveCampaigns } from "../lib/api";
+import { Link } from "react-router-dom";
+import { fetchLiveAdAccounts, fetchLiveCampaigns, fetchAbandonedCarts } from "../lib/api";
 import { getCachedDashboard, setCachedDashboard, dashboardCacheKey } from "../lib/dashboardCache";
 import { useSwrFetch } from "../lib/useSwr";
 import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
@@ -329,29 +332,52 @@ export default function Dashboard() {
     setMiscCost(Number.isFinite(v) && v >= 0 ? v : 0);
   };
 
-  // ── Phase 21 §1: Abandoned Cart Orders ──────────────────────────
-  // Fully manual, hypothetical order set — Abandoned Cart Revenue and
-  // Abandoned Cart Expenses are computed from these six inputs alone
-  // (see cardValues below) and are NEVER merged into allOrders,
-  // totalOrders, matchedOrders, unmatchedOrders, prepaid, or cod — i.e.
-  // abandoned carts never count as actual/COD/prepaid/delivered/matched
-  // orders, and none of the Meta↔Shiprocket sync/matching logic they
-  // read from is touched.
-  const [abandonedCartOrders, setAbandonedCartOrders] = usePersistedNumber("dashboardAbandonedCartOrders", 0);
-  const [abandonedCartAvgValue, setAbandonedCartAvgValue] = usePersistedNumber("dashboardAbandonedCartAvgValue", 0);
-  const [abandonedCartManufacturingCost, setAbandonedCartManufacturingCost] = usePersistedNumber(
-    "dashboardAbandonedCartManufacturingCost",
-    0
-  );
-  const [abandonedCartPackagingCost, setAbandonedCartPackagingCost] = usePersistedNumber(
-    "dashboardAbandonedCartPackagingCost",
-    0
-  );
-  const [abandonedCartShippingCost, setAbandonedCartShippingCost] = usePersistedNumber(
-    "dashboardAbandonedCartShippingCost",
-    0
-  );
-  const [abandonedCartMiscCost, setAbandonedCartMiscCost] = usePersistedNumber("dashboardAbandonedCartMiscCost", 0);
+  // ── Phase 22 §6/§8: Abandoned Cart Orders (MongoDB-backed) ──────
+  // Supersedes Phase 21 §1's manual, localStorage-only inputs — those
+  // are gone. Abandoned cart data now lives in MongoDB (see
+  // server/models/AbandonedCart.js) and is created/edited/deleted only
+  // on its own management page at /abandoned-carts (AbandonedCartsPage.jsx).
+  // Dashboard only ever READS it here, re-fetched whenever the selected
+  // date range changes, scoped to that exact range via GET
+  // /api/abandoned-carts?since=&until=. The server computes Expected
+  // Delivered Orders / Gross Potential Revenue / Recognized Abandoned
+  // Cart Revenue / expenses / Net Contribution for each record — using
+  // THAT record's own delivery rate (§10, so historical dates can each
+  // have a different rate) — and returns them pre-summed as `summary`;
+  // this component never recomputes that math itself (see cardValues
+  // below, which just reads abandonedCartSummary). Still NEVER merged
+  // into allOrders/totalOrders/matchedOrders/unmatchedOrders/prepaid/cod
+  // — abandoned carts continue to never count as actual/COD/prepaid/
+  // delivered/matched/Shiprocket orders (§8), and none of the
+  // Meta↔Shiprocket sync/matching logic is touched.
+  const [abandonedCartSummary, setAbandonedCartSummary] = useState(null);
+  const [abandonedCartLoading, setAbandonedCartLoading] = useState(false);
+  const [abandonedCartError, setAbandonedCartError] = useState(null);
+
+  const loadAbandonedCartSummary = () => {
+    if (!since || !until) return () => {};
+    let cancelled = false;
+    setAbandonedCartLoading(true);
+    setAbandonedCartError(null);
+    fetchAbandonedCarts({ since, until })
+      .then((res) => {
+        if (cancelled) return;
+        setAbandonedCartSummary(res.summary || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setAbandonedCartError(err?.message || "Failed to load abandoned cart data");
+      })
+      .finally(() => {
+        if (!cancelled) setAbandonedCartLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  };
+  // Re-fetches every time the selected date range changes (Today ↔
+  // Yesterday ↔ Last 7 Days ↔ ... ↔ Custom Range) — §6's "only
+  // abandoned-cart records inside that date range should be included".
+  useEffect(() => loadAbandonedCartSummary(), [since, until]);
 
   // ── Phase 21 §2: Additional Prepaid Revenue ─────────────────────
   // A manual top-up added on top of the real Prepaid Revenue computed
@@ -496,22 +522,37 @@ export default function Dashboard() {
     const additionalPrepaid = Number(additionalPrepaidRevenue) || 0;
     const totalPrepaidRevenue = prepaidRevenueActual + additionalPrepaid;
 
-    // Phase 21 §1 — Abandoned Cart Orders: a fully manual, hypothetical
-    // order set (see the state block above for why it never touches
-    // totalOrders/matchedOrders/prepaid/cod/allOrders).
-    const abandonedCartCostPerOrder =
-      (Number(abandonedCartManufacturingCost) || 0) +
-      (Number(abandonedCartPackagingCost) || 0) +
-      (Number(abandonedCartShippingCost) || 0) +
-      (Number(abandonedCartMiscCost) || 0);
-    const abandonedCartOrderCount = Number(abandonedCartOrders) || 0;
-    const abandonedCartRevenue = abandonedCartOrderCount * (Number(abandonedCartAvgValue) || 0);
-    const abandonedCartExpenses = abandonedCartOrderCount * abandonedCartCostPerOrder;
-    const abandonedCartContribution = abandonedCartRevenue - abandonedCartExpenses;
+    // Phase 22 §6/§10 — Abandoned Cart Orders, sourced from MongoDB via
+    // abandonedCartSummary (fetched above, scoped to the selected date
+    // range — see the state block above). Every figure here already
+    // reflects each underlying record's OWN delivery rate; recognized
+    // revenue/expenses are NOT the full orders × avgOrderValue figure
+    // (that's abandonedCartPotentialRevenue, kept only for context/
+    // display per §7's "Gross Potential Revenue" line — never added
+    // into Total Gross Revenue or profit).
+    const ac = abandonedCartSummary || {
+      orders: 0,
+      expectedDelivered: 0,
+      potentialRevenue: 0,
+      recognizedRevenue: 0,
+      totalExpenses: 0,
+      netContribution: 0,
+    };
+    const abandonedCartOrderCount = ac.orders || 0;
+    const abandonedCartExpectedDelivered = ac.expectedDelivered || 0;
+    const abandonedCartPotentialRevenue = ac.potentialRevenue || 0;
+    const abandonedCartRecognizedRevenue = ac.recognizedRevenue || 0;
+    const abandonedCartExpenses = ac.totalExpenses || 0;
+    const abandonedCartContribution = ac.netContribution || 0;
+    // Orders-weighted blended rate across every record in range, purely
+    // for a single headline percentage — each underlying record keeps
+    // its own actual configured rate (§10); this is a display rollup
+    // only, never used in any revenue/expense math above.
+    const abandonedCartDeliveryRate = abandonedCartOrderCount ? (abandonedCartExpectedDelivered / abandonedCartOrderCount) * 100 : 0;
 
     // Total Gross Revenue = Actual Order Revenue + Additional Prepaid
-    // Revenue (§2) + Abandoned Cart Revenue (§1).
-    const totalGrossRevenue = revenue + additionalPrepaid + abandonedCartRevenue;
+    // Revenue (§2) + Recognized Abandoned Cart Revenue (§1/§10).
+    const totalGrossRevenue = revenue + additionalPrepaid + abandonedCartRecognizedRevenue;
 
     // Flat per-order costs (manufacturing + shipping + packaging come
     // from the DB via dbCosts; misc is the one manually-entered field),
@@ -519,7 +560,9 @@ export default function Dashboard() {
     // regardless of outcome, since manufacturing/shipping/packaging spend
     // is typically committed as soon as an order ships, not only on
     // orders that end up delivered. Abandoned Cart orders have their own
-    // separate cost inputs above and are intentionally excluded here.
+    // separate per-order costs, configured per record on the
+    // /abandoned-carts management page, and are intentionally excluded
+    // here (their expenses are already in abandonedCartExpenses above).
     const perOrderCostTotal =
       (Number(dbCosts.manufacturing) || 0) +
       (Number(dbCosts.shipping) || 0) +
@@ -552,7 +595,7 @@ export default function Dashboard() {
         totalPerOrderCosts,
         totalOrders,
         additionalPrepaidRevenue: additionalPrepaid,
-        abandonedCartRevenue,
+        abandonedCartRecognizedRevenue,
         abandonedCartExpenses,
         profitMargin,
       },
@@ -562,7 +605,11 @@ export default function Dashboard() {
         additionalPrepaidRevenue: additionalPrepaid,
         totalPrepaidRevenue,
         codRevenueActual,
-        abandonedCartRevenue,
+        abandonedCartOrders: abandonedCartOrderCount,
+        abandonedCartDeliveryRate,
+        abandonedCartExpectedDelivered,
+        abandonedCartPotentialRevenue,
+        abandonedCartRecognizedRevenue,
         abandonedCartExpenses,
         abandonedCartContribution,
         totalGrossRevenue,
@@ -584,12 +631,7 @@ export default function Dashboard() {
     dbCosts,
     miscCost,
     additionalPrepaidRevenue,
-    abandonedCartOrders,
-    abandonedCartAvgValue,
-    abandonedCartManufacturingCost,
-    abandonedCartPackagingCost,
-    abandonedCartShippingCost,
-    abandonedCartMiscCost,
+    abandonedCartSummary,
   ]);
 
   const cardList = useMemo(
@@ -863,18 +905,9 @@ export default function Dashboard() {
                       breakdown={cardValues.revenueBreakdown}
                       additionalPrepaidRevenue={additionalPrepaidRevenue}
                       onAdditionalPrepaidRevenueChange={setAdditionalPrepaidRevenue}
-                      abandonedCartOrders={abandonedCartOrders}
-                      onAbandonedCartOrdersChange={setAbandonedCartOrders}
-                      abandonedCartAvgValue={abandonedCartAvgValue}
-                      onAbandonedCartAvgValueChange={setAbandonedCartAvgValue}
-                      abandonedCartManufacturingCost={abandonedCartManufacturingCost}
-                      onAbandonedCartManufacturingCostChange={setAbandonedCartManufacturingCost}
-                      abandonedCartPackagingCost={abandonedCartPackagingCost}
-                      onAbandonedCartPackagingCostChange={setAbandonedCartPackagingCost}
-                      abandonedCartShippingCost={abandonedCartShippingCost}
-                      onAbandonedCartShippingCostChange={setAbandonedCartShippingCost}
-                      abandonedCartMiscCost={abandonedCartMiscCost}
-                      onAbandonedCartMiscCostChange={setAbandonedCartMiscCost}
+                      abandonedCartLoading={abandonedCartLoading}
+                      abandonedCartError={abandonedCartError}
+                      onRetryAbandonedCart={loadAbandonedCartSummary}
                       onClick={onClick}
                     />
                   );
@@ -1302,10 +1335,10 @@ function ProfitCard({
             <div className="text-[11px] text-slate-400 pt-1.5 mt-0.5 border-t border-slate-100 leading-relaxed space-y-1">
               <div>
                 Total Gross Revenue {currency(breakdown.totalGrossRevenue)} (Actual {currency(breakdown.revenue)} + Additional
-                Prepaid {currency(breakdown.additionalPrepaidRevenue)} + Abandoned Cart {currency(breakdown.abandonedCartRevenue)})
-                − COD loss {currency(breakdown.codRevenueLoss)} − Spend incl. GST {currency(breakdown.spend)} − Order Costs{" "}
-                {currency(breakdown.totalPerOrderCosts)} ({breakdown.totalOrders} orders × {currency(breakdown.perOrderCostTotal)}) −
-                Abandoned Cart Expenses {currency(breakdown.abandonedCartExpenses)}
+                Prepaid {currency(breakdown.additionalPrepaidRevenue)} + Recognized Abandoned Cart{" "}
+                {currency(breakdown.abandonedCartRecognizedRevenue)}) − COD loss {currency(breakdown.codRevenueLoss)} − Spend incl.
+                GST {currency(breakdown.spend)} − Order Costs {currency(breakdown.totalPerOrderCosts)} ({breakdown.totalOrders} orders
+                × {currency(breakdown.perOrderCostTotal)}) − Abandoned Cart Expenses {currency(breakdown.abandonedCartExpenses)}
               </div>
               <div className="font-medium text-slate-500">Profit Margin {Number(breakdown.profitMargin || 0).toFixed(2)}%</div>
             </div>
@@ -1346,20 +1379,22 @@ function CostInput({ label, value, onChange }) {
   );
 }
 
-// Read-only breakdown row shared by RevenueCard/SpendCard — a label plus a
-// currency value, optionally emphasized for rollup totals.
-function BreakdownRow({ label, value, strong }) {
+// Read-only breakdown row shared by RevenueCard/SpendCard — a label plus
+// a formatted value (currency by default; pass `format` for a count or
+// percentage — see the Abandoned Cart Orders rows below), optionally
+// emphasized for rollup totals.
+function BreakdownRow({ label, value, strong, format = currency }) {
   return (
     <div className="flex items-center justify-between gap-2">
       <label className={`text-[11px] ${strong ? "text-slate-600 font-medium" : "text-slate-400"}`}>{label}</label>
-      <span className={`text-xs font-medium ${strong ? "text-slate-800" : "text-slate-600"}`}>{currency(value)}</span>
+      <span className={`text-xs font-medium ${strong ? "text-slate-800" : "text-slate-600"}`}>{format(value)}</span>
     </div>
   );
 }
 
-// Editable currency/number input row shared by RevenueCard's Abandoned
-// Cart + Additional Prepaid Revenue fields. Same visual language as the
-// Gross Profit card's CostInput above.
+// Editable currency input row — RevenueCard's Additional Prepaid Revenue
+// field (Phase 21 §2, still a local per-browser setting). Same visual
+// language as the Gross Profit card's CostInput above.
 function EditableRow({ label, value, onChange, prefix = "₹", step = "0.01" }) {
   return (
     <div className="flex items-center justify-between gap-2">
@@ -1379,12 +1414,19 @@ function EditableRow({ label, value, onChange, prefix = "₹", step = "0.01" }) 
   );
 }
 
-// Revenue card — Phase 21 §1/§2/§4. Headline stays the untouched Actual
-// Order Revenue (same number that already fed ROAS/AOV elsewhere on this
-// page); the dropdown adds the full Revenue Summary breakdown plus the
-// manual inputs for Additional Prepaid Revenue and Abandoned Cart Orders.
-// All math lives in cardValues above — this component only displays it
-// and forwards input changes to the setters passed down from Dashboard().
+// Revenue card — Phase 21 §2/§4 + Phase 22 §6/§7/§8. Headline stays the
+// untouched Actual Order Revenue (same number that already fed ROAS/AOV
+// elsewhere on this page); the dropdown adds the full Revenue Summary
+// breakdown, the manual Additional Prepaid Revenue input (Phase 21 §2 —
+// still a local, per-browser setting, unchanged), and a READ-ONLY
+// Abandoned Cart Orders summary sourced from MongoDB (Phase 22 —
+// abandonedCartSummary in Dashboard() above, filtered to the selected
+// date range). Abandoned cart records themselves are only ever
+// created/edited/deleted on their own management page, /abandoned-carts
+// (AbandonedCartsPage.jsx) — linked at the bottom of this dropdown —
+// never here, and never counted as actual/COD/prepaid/delivered/matched
+// orders (§8). All math lives in cardValues above; this component only
+// displays it.
 function RevenueCard({
   label,
   icon: Icon,
@@ -1395,18 +1437,9 @@ function RevenueCard({
   breakdown,
   additionalPrepaidRevenue,
   onAdditionalPrepaidRevenueChange,
-  abandonedCartOrders,
-  onAbandonedCartOrdersChange,
-  abandonedCartAvgValue,
-  onAbandonedCartAvgValueChange,
-  abandonedCartManufacturingCost,
-  onAbandonedCartManufacturingCostChange,
-  abandonedCartPackagingCost,
-  onAbandonedCartPackagingCostChange,
-  abandonedCartShippingCost,
-  onAbandonedCartShippingCostChange,
-  abandonedCartMiscCost,
-  onAbandonedCartMiscCostChange,
+  abandonedCartLoading,
+  abandonedCartError,
+  onRetryAbandonedCart,
   onClick,
 }) {
   const [open, setOpen] = useState(false);
@@ -1457,24 +1490,38 @@ function RevenueCard({
           />
           <BreakdownRow label="Total Prepaid Revenue" value={breakdown.totalPrepaidRevenue} strong />
           <BreakdownRow label="COD Revenue" value={breakdown.codRevenueActual} />
-          <BreakdownRow label="Abandoned Cart Revenue" value={breakdown.abandonedCartRevenue} />
+          <BreakdownRow label="Recognized Abandoned Cart Revenue" value={breakdown.abandonedCartRecognizedRevenue} />
           <BreakdownRow label="Total Gross Revenue" value={breakdown.totalGrossRevenue} strong />
 
-          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide pt-2 mt-1 border-t border-slate-100">
-            Abandoned Cart Orders
+          <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-slate-100">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Abandoned Cart Orders</div>
+            {abandonedCartLoading && <Loader2 size={11} className="animate-spin text-slate-300 shrink-0" />}
           </div>
-          <EditableRow label="Abandoned Cart Orders" value={abandonedCartOrders} onChange={onAbandonedCartOrdersChange} prefix="#" step="1" />
-          <EditableRow label="Avg. Abandoned Cart Order Value" value={abandonedCartAvgValue} onChange={onAbandonedCartAvgValueChange} />
-          <EditableRow
-            label="Manufacturing/Product Cost / Order"
-            value={abandonedCartManufacturingCost}
-            onChange={onAbandonedCartManufacturingCostChange}
-          />
-          <EditableRow label="Packaging Cost / Order" value={abandonedCartPackagingCost} onChange={onAbandonedCartPackagingCostChange} />
-          <EditableRow label="Shipping Cost / Order" value={abandonedCartShippingCost} onChange={onAbandonedCartShippingCostChange} />
-          <EditableRow label="Miscellaneous Cost / Order" value={abandonedCartMiscCost} onChange={onAbandonedCartMiscCostChange} />
-          <BreakdownRow label="Abandoned Cart Expenses" value={breakdown.abandonedCartExpenses} />
-          <BreakdownRow label="Final Revenue/Profit Contribution" value={breakdown.abandonedCartContribution} strong />
+          {abandonedCartError ? (
+            <div className="text-[11px] text-rose-500 flex items-center justify-between gap-2">
+              <span className="truncate">Couldn't load abandoned cart data</span>
+              <button type="button" className="underline shrink-0" onClick={onRetryAbandonedCart}>
+                Retry
+              </button>
+            </div>
+          ) : (
+            <>
+              <BreakdownRow label="Abandoned Cart Orders" value={breakdown.abandonedCartOrders} format={number} />
+              <BreakdownRow label="Delivery Rate" value={breakdown.abandonedCartDeliveryRate} format={(v) => `${Number(v || 0).toFixed(2)}%`} />
+              <BreakdownRow label="Expected Delivered Orders" value={breakdown.abandonedCartExpectedDelivered} format={(v) => Number(v || 0).toFixed(2)} />
+              <BreakdownRow label="Gross Potential Revenue" value={breakdown.abandonedCartPotentialRevenue} />
+              <BreakdownRow label="Recognized Abandoned Cart Revenue" value={breakdown.abandonedCartRecognizedRevenue} strong />
+              <BreakdownRow label="Abandoned Cart Expenses" value={breakdown.abandonedCartExpenses} />
+              <BreakdownRow label="Net Abandoned Cart Contribution" value={breakdown.abandonedCartContribution} strong />
+            </>
+          )}
+
+          <Link
+            to="/abandoned-carts"
+            className="flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-700 pt-1.5 mt-1 border-t border-slate-100"
+          >
+            Manage Abandoned Carts <ExternalLink size={11} />
+          </Link>
         </div>
       )}
     </div>

@@ -655,6 +655,30 @@ export async function deleteExpense(id) {
   return data; // { success }
 }
 
+// ─── Abandoned Carts (Phase 22) ────────────────────────────────────
+// New, additive routes at /api/abandoned-carts. Genuinely DB-backed
+// (Mongo), never localStorage — see AbandonedCartsPage.jsx and
+// Dashboard.jsx's Abandoned Cart section. fetchAbandonedCarts accepts
+// { since, until } (both optional, plain YYYY-MM-DD strings) — the
+// Management page calls it with no params for the full list, Dashboard
+// calls it with the currently-selected date range.
+export async function fetchAbandonedCarts(params = {}) {
+  const { data } = await api.get("/abandoned-carts", { params });
+  return data; // { success, records, summary }
+}
+export async function createAbandonedCart(payload) {
+  const { data } = await api.post("/abandoned-carts", payload);
+  return data; // { success, record }
+}
+export async function updateAbandonedCart(id, payload) {
+  const { data } = await api.put(`/abandoned-carts/${id}`, payload);
+  return data; // { success, record }
+}
+export async function deleteAbandonedCart(id) {
+  const { data } = await api.delete(`/abandoned-carts/${id}`);
+  return data; // { success }
+}
+
 // ─── Profitability (Phase 16) ──────────────────────────────────────
 // New, additive routes at /api/profitability. Every range-based call
 // takes plain YYYY-MM-DD since/until strings, same convention as
