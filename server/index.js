@@ -38,6 +38,10 @@ import profitabilityRouter from "./routes/profitability.js";
 // ShiprocketOrder or anything order/campaign matching reads from — see
 // routes/abandonedCarts.js's own header comment.
 import abandonedCartsRouter from "./routes/abandonedCarts.js";
+// Phase 25 — Store & Fetch Real Abandoned Cart Orders. Entirely new,
+// additive route file, mounted PUBLICLY (see below, before requireAuth)
+// since Traflead/Shiprocket Engage can't hold a login session cookie.
+import abandonCartPostbackRouter from "./routes/abandonCartPostback.js";
 // Phase 14 — authentication + user management. Entirely new, additive
 // route files; everything above stays untouched.
 import authRouter from "./routes/auth.js";
@@ -81,7 +85,26 @@ app.use(cors(corsOptions));
 ========================================================= */
 
 app.use(express.json());
+// Phase 25 — some webhook senders (Traflead/Shiprocket Engage-style
+// platforms) POST form-encoded bodies rather than JSON. Additive: every
+// existing route keeps using express.json() exactly as before, this
+// just means req.body also gets populated when a caller sends
+// application/x-www-form-urlencoded.
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+/* =========================================================
+   PUBLIC WEBHOOK (Phase 25) — /abandon-cart-postback must stay OUTSIDE
+   requireAuth: Traflead/Shiprocket Engage can't hold a login session
+   cookie. Mounted at both the bare path and the /api-prefixed path so
+   either URL works, whichever one ends up configured on the sender's
+   side. This is the ONLY unauthenticated write route in the app — see
+   routes/abandonCartPostback.js's own header comment for why that's
+   safe (it can only ever upsert one AbandonedCartOrder document).
+========================================================= */
+
+app.use("/abandon-cart-postback", abandonCartPostbackRouter);
+app.use("/api/abandon-cart-postback", abandonCartPostbackRouter);
 
 /* =========================================================
    AUTH (Phase 14) — /api/auth stays public (no signup route exists;

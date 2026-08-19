@@ -1,280 +1,414 @@
-import { useMemo, useState } from "react";
-import { ShoppingBag, Plus, Loader2, Pencil, Trash2, AlertTriangle, X, RefreshCw, CalendarRange } from "lucide-react";
-import { fetchAbandonedCarts, createAbandonedCart, updateAbandonedCart, deleteAbandonedCart } from "../lib/api";
-import { currency as formatCurrency, number as formatNumber, formatDate } from "../lib/format";
-import DataTable from "../components/DataTable";
-import { getCachedAbandonedCarts, setCachedAbandonedCarts, ABANDONED_CARTS_CACHE_KEY } from "../lib/abandonedCartsCache";
-import { useSwrFetch } from "../lib/useSwr";
-import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ShoppingBag,
+  Loader2,
+  Pencil,
+  Trash2,
+  Eye,
+  AlertTriangle,
+  X,
+  RefreshCw,
+  CalendarRange,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  Settings2,
+  ExternalLink,
+} from "lucide-react";
+import {
+  fetchAbandonedCarts,
+  fetchAbandonedCart,
+  updateAbandonedCart,
+  deleteAbandonedCart,
+  fetchAbandonedCartSettings,
+  updateAbandonedCartSettings,
+} from "../lib/api";
+import { currency as formatCurrency, number as formatNumber, formatDateTime } from "../lib/format";
 
 // ────────────────────────────────────────────────────────────────
-// Phase 22 — Abandoned Cart Management. Entirely new, additive page
-// (talks only to the new /api/abandoned-carts routes — see lib/api.js
-// and server/routes/abandonedCarts.js). Genuinely DB-backed (Mongo) —
-// §5 is explicit that abandoned-cart data must never live in
-// localStorage, so unlike Dashboard's Additional Prepaid Revenue field
-// (Phase 21, untouched), every value on this page round-trips through
-// the server on every add/edit/delete. DataTable's own column-width/
-// sort/page-size UI preferences still use localStorage internally
-// (pre-existing, unrelated — see DataTable.jsx) — that's display
-// preference, not abandoned-cart data, so it's not in scope for §5.
+// Phase 25 — Store & Fetch Real Abandoned Cart Orders. Replaces Phase
+// 22's manual daily-total entry page. Every record here is a REAL
+// abandoned-cart order, written automatically by the
+// /abandon-cart-postback webhook (Traflead / Shiprocket Engage) into
+// MongoDB (see server/models/AbandonedCartOrder.js) — this page never
+// creates a record, it only searches/filters/views/edits/deletes what
+// the database already has (§6 — "the database records themselves
+// should determine the daily totals," §7 architecture diagram: Postback
+// -> MongoDB -> this page -> Dashboard).
 //
-// §10 — "Revenue must only be recognized for the selected delivery/
-// success percentage" and §2's exact formula (Orders × Delivery Rate ×
-// Average Order Value) are computed server-side in
-// routes/abandonedCarts.js's computeDerived() — this page never
-// recomputes the authoritative numbers, it only displays what the
-// server returns. The one exception is the Add/Edit form's "Live
-// Preview" panel below, which mirrors that same formula client-side
-// purely for instant feedback while typing (§3 — "do not silently hide
-// expenses"); the value that actually gets saved always comes back
-// from the server's response.
+// §5 — the delivery/success rate and the four per-order costs are now
+// GLOBAL settings (server/models/AbandonedCartSettings.js), edited in
+// the collapsible panel below, instead of one value typed per daily
+// record. The range summary (§4) is computed server-side in
+// routes/abandonedCarts.js's computeSummary() from those settings +
+// every matching order's own cart value — this page only displays it.
 // ────────────────────────────────────────────────────────────────
 
-const todayIso = () => new Date().toISOString().slice(0, 10);
-
-const emptyForm = {
-  date: todayIso(),
-  orders: "",
-  avgOrderValue: "",
-  deliveryRate: "70",
-  manufacturingCost: "",
-  packagingCost: "",
-  shippingCost: "",
-  miscCost: "",
-  notes: "",
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const todayIso = () => new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+const shiftDays = (dateStr, days) => {
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 };
 
-// Client-side mirror of server/routes/abandonedCarts.js's computeDerived()
-// — same formula, same field names — used ONLY for the Add/Edit form's
-// live preview. The persisted, authoritative numbers always come from
-// the server's response (see shape() there).
-function computeDerived(form) {
-  const orders = Number(form.orders) || 0;
-  const avgOrderValue = Number(form.avgOrderValue) || 0;
-  const deliveryRate = Number(form.deliveryRate) || 0;
-  const manufacturingCost = Number(form.manufacturingCost) || 0;
-  const packagingCost = Number(form.packagingCost) || 0;
-  const shippingCost = Number(form.shippingCost) || 0;
-  const miscCost = Number(form.miscCost) || 0;
+const PAGE_SIZES = [10, 25, 50, 100];
 
-  const expectedDelivered = orders * (deliveryRate / 100);
-  const potentialRevenue = orders * avgOrderValue;
-  const recognizedRevenue = expectedDelivered * avgOrderValue;
-  const manufacturingExpense = expectedDelivered * manufacturingCost;
-  const packagingExpense = expectedDelivered * packagingCost;
-  const shippingExpense = expectedDelivered * shippingCost;
-  const miscExpense = expectedDelivered * miscCost;
-  const totalExpenses = manufacturingExpense + packagingExpense + shippingExpense + miscExpense;
-  const netContribution = recognizedRevenue - totalExpenses;
-
-  return {
-    expectedDelivered,
-    potentialRevenue,
-    recognizedRevenue,
-    manufacturingExpense,
-    packagingExpense,
-    shippingExpense,
-    miscExpense,
-    totalExpenses,
-    netContribution,
-  };
+function productSummary(items) {
+  if (!items || items.length === 0) return { label: "—", title: "" };
+  const names = items.map((it) => it.name || it.sku || "Item").filter(Boolean);
+  const label = names.length > 1 ? `${names[0]} +${names.length - 1} more` : names[0];
+  const title = items.map((it) => `${it.name || it.sku || "Item"} × ${it.quantity || 1} (${formatCurrency(it.price)})`).join("\n");
+  return { label, title };
 }
 
-function PreviewStat({ label, value, strong }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-slate-400 truncate">{label}</div>
-      <div className={`truncate ${strong ? "font-semibold text-slate-700" : "text-slate-600"}`}>{value}</div>
-    </div>
-  );
-}
-
-// §3 — "Then calculate the configured expenses clearly. Do not silently
-// hide expenses." Every expense line (not just the total) is shown here
-// as the user types, updating immediately with every keystroke.
-function LivePreview({ form }) {
-  const d = computeDerived(form);
-  return (
-    <div className="w-full grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-2 text-[11px] bg-slate-50 border border-slate-100 rounded-lg px-3 py-2.5">
-      <PreviewStat label="Expected Delivered" value={formatNumber(d.expectedDelivered)} />
-      <PreviewStat label="Potential Revenue" value={formatCurrency(d.potentialRevenue)} />
-      <PreviewStat label="Recognized Revenue" value={formatCurrency(d.recognizedRevenue)} strong />
-      <PreviewStat label="Total Expenses" value={formatCurrency(d.totalExpenses)} />
-      <PreviewStat label="Net Contribution" value={formatCurrency(d.netContribution)} strong />
-      <PreviewStat label="Manufacturing" value={formatCurrency(d.manufacturingExpense)} />
-      <PreviewStat label="Packaging" value={formatCurrency(d.packagingExpense)} />
-      <PreviewStat label="Shipping" value={formatCurrency(d.shippingExpense)} />
-      <PreviewStat label="Miscellaneous" value={formatCurrency(d.miscExpense)} />
-    </div>
-  );
-}
-
-function AbandonedCartFormFields({ form, setForm }) {
-  return (
-    <>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
-        Date
-        <input type="date" className="input" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} required />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-        Abandoned Orders
-        <input
-          type="number"
-          min="0"
-          step="1"
-          className="input"
-          value={form.orders}
-          onChange={(e) => setForm((f) => ({ ...f, orders: e.target.value }))}
-          placeholder="0"
-          required
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-        Avg. Order Value
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          className="input"
-          value={form.avgOrderValue}
-          onChange={(e) => setForm((f) => ({ ...f, avgOrderValue: e.target.value }))}
-          placeholder="₹0"
-          required
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-        Delivery Rate %
-        <input
-          type="number"
-          min="0"
-          max="100"
-          step="0.01"
-          className="input"
-          value={form.deliveryRate}
-          onChange={(e) => setForm((f) => ({ ...f, deliveryRate: e.target.value }))}
-          placeholder="70"
-          required
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
-        Manufacturing Cost / Order
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          className="input"
-          value={form.manufacturingCost}
-          onChange={(e) => setForm((f) => ({ ...f, manufacturingCost: e.target.value }))}
-          placeholder="₹0"
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-        Packaging Cost / Order
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          className="input"
-          value={form.packagingCost}
-          onChange={(e) => setForm((f) => ({ ...f, packagingCost: e.target.value }))}
-          placeholder="₹0"
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-        Shipping Cost / Order
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          className="input"
-          value={form.shippingCost}
-          onChange={(e) => setForm((f) => ({ ...f, shippingCost: e.target.value }))}
-          placeholder="₹0"
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-        Misc Cost / Order
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          className="input"
-          value={form.miscCost}
-          onChange={(e) => setForm((f) => ({ ...f, miscCost: e.target.value }))}
-          placeholder="₹0"
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
-        Notes
-        <input className="input" value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} placeholder="Optional" />
-      </label>
-    </>
-  );
-}
-
-function AddAbandonedCartForm({ onAdded }) {
-  const [form, setForm] = useState(emptyForm);
-  const [submitting, setSubmitting] = useState(false);
+function SettingsPanel({ open, onClose }) {
+  const [form, setForm] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [savedAt, setSavedAt] = useState(null);
 
-  const handleSubmit = async (e) => {
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    fetchAbandonedCartSettings()
+      .then((res) => {
+        if (cancelled) return;
+        setForm({
+          deliveryRate: String(res.deliveryRate ?? 70),
+          manufacturingCost: String(res.manufacturingCost ?? 0),
+          packagingCost: String(res.packagingCost ?? 0),
+          shippingCost: String(res.shippingCost ?? 0),
+          miscCost: String(res.miscCost ?? 0),
+        });
+      })
+      .catch((err) => !cancelled && setError(err.message || "Failed to load settings"))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  const handleSave = async (e) => {
     e.preventDefault();
-    if (submitting) return;
+    setSaving(true);
     setError("");
-    setSubmitting(true);
     try {
-      const res = await createAbandonedCart(form);
-      onAdded(res.record);
-      setForm({ ...emptyForm, date: todayIso() });
+      const res = await updateAbandonedCartSettings({
+        deliveryRate: Number(form.deliveryRate) || 0,
+        manufacturingCost: Number(form.manufacturingCost) || 0,
+        packagingCost: Number(form.packagingCost) || 0,
+        shippingCost: Number(form.shippingCost) || 0,
+        miscCost: Number(form.miscCost) || 0,
+      });
+      setForm({
+        deliveryRate: String(res.deliveryRate ?? 0),
+        manufacturingCost: String(res.manufacturingCost ?? 0),
+        packagingCost: String(res.packagingCost ?? 0),
+        shippingCost: String(res.shippingCost ?? 0),
+        miscCost: String(res.miscCost ?? 0),
+      });
+      setSavedAt(Date.now());
     } catch (err) {
-      setError(err.message || "Failed to add abandoned cart record");
+      setError(err.message || "Failed to save settings");
     } finally {
-      setSubmitting(false);
+      setSaving(false);
     }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="card flex flex-col gap-3">
-      <div className="flex flex-wrap items-end gap-3">
-        <AbandonedCartFormFields form={form} setForm={setForm} />
-        <button type="submit" className="btn btn-primary btn-sm" disabled={submitting}>
-          {submitting ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-          Add Record
+    <div className="card flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <div className="font-display font-semibold text-sm text-slate-800">Abandoned Cart Settings</div>
+        <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
+          <X size={15} />
         </button>
       </div>
-      <LivePreview form={form} />
+      <p className="text-xs text-slate-400 -mt-1">
+        Applies to every abandoned cart, everywhere in the app (this page and the Dashboard). Expenses are scaled by Expected
+        Delivered Orders (Orders × Delivery Rate), not the raw order count.
+      </p>
+      {loading || !form ? (
+        <div className="h-16 animate-pulse bg-slate-100 rounded-lg" />
+      ) : (
+        <form onSubmit={handleSave} className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+            Delivery Rate %
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.01"
+              className="input"
+              value={form.deliveryRate}
+              onChange={(e) => setForm((f) => ({ ...f, deliveryRate: e.target.value }))}
+              required
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
+            Manufacturing Cost / Order
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              value={form.manufacturingCost}
+              onChange={(e) => setForm((f) => ({ ...f, manufacturingCost: e.target.value }))}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+            Packaging Cost / Order
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              value={form.packagingCost}
+              onChange={(e) => setForm((f) => ({ ...f, packagingCost: e.target.value }))}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+            Shipping Cost / Order
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              value={form.shippingCost}
+              onChange={(e) => setForm((f) => ({ ...f, shippingCost: e.target.value }))}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+            Misc Cost / Order
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              value={form.miscCost}
+              onChange={(e) => setForm((f) => ({ ...f, miscCost: e.target.value }))}
+            />
+          </label>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
+            {saving ? <Loader2 size={13} className="animate-spin" /> : "Save"}
+          </button>
+          {savedAt && !saving && <span className="text-xs text-emerald-600">Saved</span>}
+        </form>
+      )}
       {error && (
         <div className="flex items-center gap-1.5 text-xs text-rose-600">
           <AlertTriangle size={12} /> {error}
         </div>
       )}
-    </form>
+    </div>
   );
 }
 
-function EditAbandonedCartModal({ record, onClose, onSaved }) {
-  const [form, setForm] = useState({
-    date: record.date || "",
-    orders: record.orders ?? "",
-    avgOrderValue: record.avgOrderValue ?? "",
-    deliveryRate: record.deliveryRate ?? "",
-    manufacturingCost: record.manufacturingCost ?? "",
-    packagingCost: record.packagingCost ?? "",
-    shippingCost: record.shippingCost ?? "",
-    miscCost: record.miscCost ?? "",
-    notes: record.notes || "",
-  });
+function AddressBlock({ address, pincode }) {
+  const parts = [address?.line1, address?.line2, address?.city, address?.state, pincode || address?.pincode, address?.country].filter(
+    Boolean
+  );
+  if (parts.length === 0) return <span className="text-slate-300">—</span>;
+  return <span>{parts.join(", ")}</span>;
+}
+
+function ViewDetailsModal({ id, onClose }) {
+  const [record, setRecord] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchAbandonedCart(id)
+      .then((res) => !cancelled && setRecord(res.record))
+      .catch((err) => !cancelled && setError(err.message || "Failed to load record"))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <div className="font-display font-semibold text-sm text-slate-800">Abandoned cart details</div>
+          <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
+            <X size={15} />
+          </button>
+        </div>
+
+        {loading && <div className="h-40 animate-pulse bg-slate-100 rounded-lg" />}
+        {error && <div className="text-xs text-rose-600">{error}</div>}
+
+        {record && !loading && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2.5">
+              <Field label="Date / Time" value={formatDateTime(record.orderTimestamp)} />
+              <Field label="Source" value={record.source || "—"} />
+              <Field label="Payment Status" value={record.paymentStatus || "—"} />
+              <Field label="Cart ID" value={record.cartId || "—"} />
+              <Field label="Order ID" value={record.externalOrderId || "—"} />
+              <Field label="Abandoned Cart ID" value={record.abandonedCartId || "—"} />
+              <Field label="Customer" value={record.customerName || "—"} />
+              <Field label="Phone" value={record.phone || "—"} />
+              <Field label="Email" value={record.email || "—"} />
+              <Field label="Cart Value" value={formatCurrency(record.cartValue)} strong />
+              <Field label="Campaign" value={record.utmCampaign || "—"} />
+              <Field label="Adset" value={record.adsetName || "—"} />
+              <Field label="Ad" value={record.adId || "—"} />
+              <Field label="Pincode" value={record.pincode || "—"} />
+              <div className="col-span-2 sm:col-span-3">
+                <div className="text-slate-400">Shipping Address</div>
+                <div className="text-slate-700 mt-0.5">
+                  <AddressBlock address={record.shippingAddress} pincode={record.pincode} />
+                </div>
+              </div>
+              {record.checkoutUrl && (
+                <div className="col-span-2 sm:col-span-3">
+                  <div className="text-slate-400">Checkout URL</div>
+                  <a
+                    href={record.checkoutUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-indigo-600 hover:underline inline-flex items-center gap-1 break-all"
+                  >
+                    {record.checkoutUrl} <ExternalLink size={11} className="shrink-0" />
+                  </a>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-slate-400 mb-1.5">Items</div>
+              {record.items && record.items.length > 0 ? (
+                <div className="border border-slate-100 rounded-lg overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 text-slate-500">
+                      <tr>
+                        <th className="text-left px-2.5 py-1.5 font-medium">Product</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium">SKU</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium">Variant</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium">Qty</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium">Price</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {record.items.map((it, i) => (
+                        <tr key={i} className="border-t border-slate-100">
+                          <td className="px-2.5 py-1.5">{it.name || "—"}</td>
+                          <td className="px-2.5 py-1.5">{it.sku || "—"}</td>
+                          <td className="px-2.5 py-1.5">{it.variantId || "—"}</td>
+                          <td className="px-2.5 py-1.5 text-right">{formatNumber(it.quantity)}</td>
+                          <td className="px-2.5 py-1.5 text-right">{formatCurrency(it.price)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <span className="text-slate-300">No line items recorded</span>
+              )}
+            </div>
+
+            {record.notes && (
+              <div>
+                <div className="text-slate-400 mb-1">Notes</div>
+                <div className="text-slate-700">{record.notes}</div>
+              </div>
+            )}
+
+            <details className="text-xs">
+              <summary className="cursor-pointer text-slate-400 hover:text-slate-600">Raw postback payload</summary>
+              <pre className="mt-2 bg-slate-50 border border-slate-100 rounded-lg p-2.5 overflow-auto max-h-64 text-[10px] leading-relaxed">
+                {JSON.stringify(record.rawPayload || {}, null, 2)}
+              </pre>
+            </details>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value, strong }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-slate-400">{label}</div>
+      <div className={`truncate ${strong ? "font-semibold text-slate-800" : "text-slate-700"}`}>{value}</div>
+    </div>
+  );
+}
+
+function EditAbandonedCartModal({ id, onClose, onSaved }) {
+  const [form, setForm] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchAbandonedCart(id)
+      .then((res) => {
+        if (cancelled) return;
+        const r = res.record;
+        setForm({
+          customerName: r.customerName || "",
+          phone: r.phone || "",
+          email: r.email || "",
+          cartValue: r.cartValue ?? "",
+          paymentStatus: r.paymentStatus || "",
+          utmCampaign: r.utmCampaign || "",
+          adsetName: r.adsetName || "",
+          adId: r.adId || "",
+          checkoutUrl: r.checkoutUrl || "",
+          line1: r.shippingAddress?.line1 || "",
+          line2: r.shippingAddress?.line2 || "",
+          city: r.shippingAddress?.city || "",
+          state: r.shippingAddress?.state || "",
+          pincode: r.pincode || r.shippingAddress?.pincode || "",
+          country: r.shippingAddress?.country || "",
+          notes: r.notes || "",
+        });
+      })
+      .catch((err) => !cancelled && setError(err.message || "Failed to load record"))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (submitting) return;
+    if (submitting || !form) return;
     setError("");
     setSubmitting(true);
     try {
-      const res = await updateAbandonedCart(record.id, form);
+      const res = await updateAbandonedCart(id, {
+        customerName: form.customerName,
+        phone: form.phone,
+        email: form.email,
+        cartValue: Number(form.cartValue) || 0,
+        paymentStatus: form.paymentStatus,
+        utmCampaign: form.utmCampaign,
+        adsetName: form.adsetName,
+        adId: form.adId,
+        checkoutUrl: form.checkoutUrl,
+        shippingAddress: {
+          line1: form.line1,
+          line2: form.line2,
+          city: form.city,
+          state: form.state,
+          pincode: form.pincode,
+          country: form.country,
+        },
+        notes: form.notes,
+      });
       onSaved(res.record);
     } catch (err) {
       setError(err.message || "Failed to update abandoned cart record");
@@ -283,25 +417,106 @@ function EditAbandonedCartModal({ record, onClose, onSaved }) {
     }
   };
 
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+      <form
+        onSubmit={handleSubmit}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between">
           <div className="font-display font-semibold text-sm text-slate-800">Edit abandoned cart record</div>
           <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
             <X size={15} />
           </button>
         </div>
-        <div className="flex flex-wrap items-end gap-3">
-          <AbandonedCartFormFields form={form} setForm={setForm} />
-        </div>
-        <LivePreview form={form} />
+
+        {loading || !form ? (
+          <div className="h-40 animate-pulse bg-slate-100 rounded-lg" />
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
+                Customer Name
+                <input className="input" value={form.customerName} onChange={set("customerName")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-40">
+                Phone
+                <input className="input" value={form.phone} onChange={set("phone")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[180px]">
+                Email
+                <input className="input" value={form.email} onChange={set("email")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+                Cart Value
+                <input type="number" min="0" step="0.01" className="input" value={form.cartValue} onChange={set("cartValue")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
+                Payment Status
+                <input className="input" value={form.paymentStatus} onChange={set("paymentStatus")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
+                Campaign
+                <input className="input" value={form.utmCampaign} onChange={set("utmCampaign")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+                Adset
+                <input className="input" value={form.adsetName} onChange={set("adsetName")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-28">
+                Ad
+                <input className="input" value={form.adId} onChange={set("adId")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[200px]">
+                Checkout URL
+                <input className="input" value={form.checkoutUrl} onChange={set("checkoutUrl")} />
+              </label>
+            </div>
+
+            <div className="text-xs text-slate-400 pt-1">Shipping Address</div>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
+                Address Line 1
+                <input className="input" value={form.line1} onChange={set("line1")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
+                Address Line 2
+                <input className="input" value={form.line2} onChange={set("line2")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+                City
+                <input className="input" value={form.city} onChange={set("city")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+                State
+                <input className="input" value={form.state} onChange={set("state")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-28">
+                Pincode
+                <input className="input" value={form.pincode} onChange={set("pincode")} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-500 w-28">
+                Country
+                <input className="input" value={form.country} onChange={set("country")} />
+              </label>
+            </div>
+
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              Notes
+              <input className="input" value={form.notes} onChange={set("notes")} placeholder="Optional" />
+            </label>
+          </>
+        )}
+
         {error && <div className="text-xs text-rose-600">{error}</div>}
         <div className="flex justify-end gap-2">
           <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn btn-primary btn-sm" disabled={submitting}>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={submitting || loading}>
             {submitting ? <Loader2 size={13} className="animate-spin" /> : "Save"}
           </button>
         </div>
@@ -311,109 +526,69 @@ function EditAbandonedCartModal({ record, onClose, onSaved }) {
 }
 
 export default function AbandonedCartsPage() {
-  const [actionError, setActionError] = useState("");
+  const [since, setSince] = useState(shiftDays(todayIso(), -29));
+  const [until, setUntil] = useState(todayIso());
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [viewId, setViewId] = useState(null);
+  const [editId, setEditId] = useState(null);
   const [busyId, setBusyId] = useState(null);
-  const [editTarget, setEditTarget] = useState(null);
-  // §9 — "Date filtering", on top of DataTable's own free-text search
-  // (which already covers date/notes via searchKeys below). Purely a
-  // client-side filter over the already-fetched full list — no extra
-  // network round-trip, since the list here is small/config-like data,
-  // same reasoning as Expenses/Products.
-  const [filterSince, setFilterSince] = useState("");
-  const [filterUntil, setFilterUntil] = useState("");
+  const [actionError, setActionError] = useState("");
 
-  const {
-    data: recordsData,
-    loading,
-    isValidating,
-    error,
-    backgroundError,
-    lastUpdatedAt,
-    refresh,
-    mutate,
-  } = useSwrFetch(ABANDONED_CARTS_CACHE_KEY, () => fetchAbandonedCarts().then((res) => res.records || []), {
-    staleTimeMs: 5 * 60 * 1000,
-    getCached: getCachedAbandonedCarts,
-    setCached: setCachedAbandonedCarts,
-  });
-  const records = recordsData || [];
+  // §3/§9 — debounce the search box so every keystroke doesn't fire a
+  // network request.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setPage(1);
+      setSearch(searchInput.trim());
+    }, 350);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
-  const filteredRecords = useMemo(() => {
-    if (!filterSince && !filterUntil) return records;
-    return records.filter((r) => (!filterSince || r.date >= filterSince) && (!filterUntil || r.date <= filterUntil));
-  }, [records, filterSince, filterUntil]);
+  useEffect(() => setPage(1), [since, until, pageSize]);
 
-  const totals = useMemo(
-    () =>
-      filteredRecords.reduce(
-        (acc, r) => ({
-          orders: acc.orders + (r.orders || 0),
-          recognizedRevenue: acc.recognizedRevenue + (r.recognizedRevenue || 0),
-          totalExpenses: acc.totalExpenses + (r.totalExpenses || 0),
-          netContribution: acc.netContribution + (r.netContribution || 0),
-        }),
-        { orders: 0, recognizedRevenue: 0, totalExpenses: 0, netContribution: 0 }
-      ),
-    [filteredRecords]
-  );
+  const load = (background = false) => {
+    if (background) setRefreshing(true);
+    else setLoading(true);
+    setError("");
+    fetchAbandonedCarts({ since, until, search, page, pageSize })
+      .then((res) => setData(res))
+      .catch((err) => setError(err.message || "Failed to load abandoned cart records"))
+      .finally(() => {
+        setLoading(false);
+        setRefreshing(false);
+      });
+  };
+
+  useEffect(load, [since, until, search, page, pageSize]);
+
+  const records = data?.records || [];
+  const summary = data?.summary || null;
+  const totalPages = data?.totalPages || 1;
+  const total = data?.total ?? 0;
 
   const handleDelete = async (r) => {
-    if (!window.confirm(`Delete the abandoned cart record for ${formatDate(r.date)}? This can't be undone.`)) return;
+    if (!window.confirm(`Delete the abandoned cart record for ${r.customerName || r.phone || r.cartId || "this cart"}? This can't be undone.`)) return;
     setBusyId(r.id);
+    setActionError("");
     try {
       await deleteAbandonedCart(r.id);
-      mutate((prev) => (prev || []).filter((x) => x.id !== r.id));
+      load(true);
     } catch (err) {
       setActionError(err.message || "Failed to delete abandoned cart record");
     } finally {
       setBusyId(null);
     }
   };
-
-  const columns = [
-    { key: "date", label: "Date", render: (r) => <span className="font-medium text-slate-700">{formatDate(r.date)}</span> },
-    { key: "orders", label: "Abandoned", render: (r) => formatNumber(r.orders) },
-    { key: "deliveryRate", label: "Delivery %", render: (r) => `${Number(r.deliveryRate || 0).toFixed(2)}%` },
-    { key: "expectedDelivered", label: "Expected Delivered", render: (r) => formatNumber(Math.round(r.expectedDelivered * 100) / 100) },
-    { key: "potentialRevenue", label: "Potential Revenue", render: (r) => formatCurrency(r.potentialRevenue) },
-    { key: "recognizedRevenue", label: "Recognized Revenue", render: (r) => <span className="font-medium text-emerald-700">{formatCurrency(r.recognizedRevenue)}</span> },
-    {
-      key: "totalExpenses",
-      label: "Expenses",
-      render: (r) => (
-        <span
-          className="text-rose-600"
-          title={`Manufacturing ${formatCurrency(r.manufacturingExpense)} · Packaging ${formatCurrency(r.packagingExpense)} · Shipping ${formatCurrency(
-            r.shippingExpense
-          )} · Misc ${formatCurrency(r.miscExpense)}`}
-        >
-          {formatCurrency(r.totalExpenses)}
-        </span>
-      ),
-    },
-    {
-      key: "netContribution",
-      label: "Net",
-      render: (r) => <span className={`font-semibold ${r.netContribution >= 0 ? "text-emerald-700" : "text-rose-600"}`}>{formatCurrency(r.netContribution)}</span>,
-    },
-    { key: "notes", label: "Notes", render: (r) => r.notes || <span className="text-slate-300">—</span> },
-    {
-      key: "actions",
-      label: "",
-      sortable: false,
-      defaultWidth: 90,
-      render: (r) => (
-        <div className="flex items-center gap-1.5" onClick={(ev) => ev.stopPropagation()}>
-          <button type="button" className="text-slate-400 hover:text-indigo-600 disabled:opacity-40" title="Edit" disabled={busyId === r.id} onClick={() => setEditTarget(r)}>
-            <Pencil size={14} />
-          </button>
-          <button type="button" className="text-slate-400 hover:text-rose-600 disabled:opacity-40" title="Delete" disabled={busyId === r.id} onClick={() => handleDelete(r)}>
-            <Trash2 size={14} />
-          </button>
-        </div>
-      ),
-    },
-  ];
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
@@ -425,23 +600,25 @@ export default function AbandonedCartsPage() {
           <div>
             <h1 className="text-lg font-display font-bold text-slate-800 leading-tight">Abandoned Carts</h1>
             <p className="text-xs text-slate-400">
-              {loading
+              {loading || !summary
                 ? "Loading…"
-                : `${filteredRecords.length} record${filteredRecords.length === 1 ? "" : "s"} · ${formatNumber(totals.orders)} orders · Recognized ${formatCurrency(
-                    totals.recognizedRevenue
-                  )} · Net ${formatCurrency(totals.netContribution)}`}
+                : `${formatNumber(summary.orders)} abandoned cart${summary.orders === 1 ? "" : "s"} in range · Potential ${formatCurrency(
+                    summary.potentialRevenue
+                  )} · Recognized ${formatCurrency(summary.recognizedRevenue)} · Net ${formatCurrency(summary.netContribution)}`}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2.5">
-          <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
-          <button type="button" className="btn btn-secondary btn-sm" onClick={refresh} disabled={isValidating}>
-            <RefreshCw size={13} className={isValidating ? "animate-spin" : ""} /> Refresh
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setSettingsOpen((v) => !v)}>
+            <Settings2 size={13} /> Settings
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => load(true)} disabled={refreshing}>
+            <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
           </button>
         </div>
       </div>
 
-      <AddAbandonedCartForm onAdded={(x) => mutate((prev) => [x, ...(prev || [])])} />
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {(actionError || error) && (
         <div className="flex items-center gap-1.5 text-xs text-rose-600">
@@ -450,25 +627,32 @@ export default function AbandonedCartsPage() {
       )}
 
       <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[220px] max-w-sm">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            className="input pl-7 !py-1.5 !text-xs"
+            placeholder="Search customer, phone, email, cart ID, campaign…"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+        </div>
         <div className="flex items-center gap-1.5 text-xs text-slate-500">
           <CalendarRange size={13} />
           Date range
         </div>
-        <input type="date" className="input w-auto !py-1.5 !text-xs" value={filterSince} max={filterUntil || undefined} onChange={(e) => setFilterSince(e.target.value)} />
+        <input type="date" className="input w-auto !py-1.5 !text-xs" value={since} max={until || undefined} onChange={(e) => setSince(e.target.value)} />
         <span className="text-slate-400 text-xs">to</span>
-        <input type="date" className="input w-auto !py-1.5 !text-xs" value={filterUntil} min={filterSince || undefined} onChange={(e) => setFilterUntil(e.target.value)} />
-        {(filterSince || filterUntil) && (
-          <button
-            type="button"
-            className="text-xs text-slate-400 hover:text-slate-600 underline"
-            onClick={() => {
-              setFilterSince("");
-              setFilterUntil("");
-            }}
-          >
-            Clear
-          </button>
-        )}
+        <input type="date" className="input w-auto !py-1.5 !text-xs" value={until} min={since || undefined} onChange={(e) => setUntil(e.target.value)} />
+        <button
+          type="button"
+          className="text-xs text-slate-400 hover:text-slate-600 underline"
+          onClick={() => {
+            setSince(shiftDays(todayIso(), -29));
+            setUntil(todayIso());
+          }}
+        >
+          Last 30 days
+        </button>
       </div>
 
       {loading ? (
@@ -478,23 +662,101 @@ export default function AbandonedCartsPage() {
           ))}
         </div>
       ) : (
-        <DataTable
-          tableId="abandonedCarts"
-          columns={columns}
-          data={filteredRecords}
-          searchKeys={["date", "notes"]}
-          exportFilename="abandoned-carts.csv"
-          emptyMessage="No abandoned cart records yet. Add one above."
-        />
+        <>
+          <div className="card p-0 overflow-auto max-h-[560px]">
+            <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
+              <thead>
+                <tr>
+                  {["Date / Time", "Customer", "Cart ID", "Product", "Amount", "Campaign", "Adset", "Ad", ""].map((h) => (
+                    <th key={h} className="sticky top-0 z-[2] bg-slate-50 text-left">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {records.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="text-center py-10 text-slate-400 text-sm">
+                      No abandoned cart records for this range/search.
+                    </td>
+                  </tr>
+                ) : (
+                  records.map((r) => {
+                    const product = productSummary(r.items);
+                    return (
+                      <tr key={r.id} className="cursor-pointer" onClick={() => setViewId(r.id)}>
+                        <td className="font-medium text-slate-700 whitespace-nowrap">{formatDateTime(r.orderTimestamp)}</td>
+                        <td>
+                          <div className="text-slate-700">{r.customerName || "—"}</div>
+                          {(r.phone || r.email) && <div className="text-slate-400 text-[11px]">{r.phone || r.email}</div>}
+                        </td>
+                        <td className="text-slate-600">{r.cartId || r.externalOrderId || r.abandonedCartId || "—"}</td>
+                        <td title={product.title}>{product.label}</td>
+                        <td className="font-medium">{formatCurrency(r.cartValue)}</td>
+                        <td className="text-slate-600">{r.utmCampaign || "—"}</td>
+                        <td className="text-slate-600">{r.adsetName || "—"}</td>
+                        <td className="text-slate-600">{r.adId || "—"}</td>
+                        <td onClick={(ev) => ev.stopPropagation()}>
+                          <div className="flex items-center gap-1.5">
+                            <button type="button" className="text-slate-400 hover:text-indigo-600" title="View details" onClick={() => setViewId(r.id)}>
+                              <Eye size={14} />
+                            </button>
+                            <button type="button" className="text-slate-400 hover:text-indigo-600" title="Edit" disabled={busyId === r.id} onClick={() => setEditId(r.id)}>
+                              <Pencil size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              className="text-slate-400 hover:text-rose-600 disabled:opacity-40"
+                              title="Delete"
+                              disabled={busyId === r.id}
+                              onClick={() => handleDelete(r)}
+                            >
+                              {busyId === r.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-between px-1 py-1 text-xs text-slate-500">
+            <div className="flex items-center gap-2">
+              <span>
+                Page {page} of {totalPages} · {formatNumber(total)} record{total === 1 ? "" : "s"}
+              </span>
+              <select className="input !py-1 !text-xs w-auto" value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+                {PAGE_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n} / page
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button type="button" className="btn btn-secondary btn-sm !px-2" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                <ChevronLeft size={13} />
+              </button>
+              <button type="button" className="btn btn-secondary btn-sm !px-2" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>
+                <ChevronRight size={13} />
+              </button>
+            </div>
+          </div>
+        </>
       )}
 
-      {editTarget && (
+      {viewId && <ViewDetailsModal id={viewId} onClose={() => setViewId(null)} />}
+      {editId && (
         <EditAbandonedCartModal
-          record={editTarget}
-          onClose={() => setEditTarget(null)}
-          onSaved={(x) => {
-            mutate((prev) => (prev || []).map((r) => (r.id === x.id ? x : r)));
-            setEditTarget(null);
+          id={editId}
+          onClose={() => setEditId(null)}
+          onSaved={() => {
+            setEditId(null);
+            load(true);
           }}
         />
       )}

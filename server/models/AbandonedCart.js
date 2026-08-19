@@ -1,6 +1,23 @@
 import mongoose from "mongoose";
 
 // ─────────────────────────────────────────────────────────────
+// DEPRECATED as of Phase 25 — "Store & Fetch Real Abandoned Cart
+// Orders" replaced manual daily-total entry (this model) with real,
+// individual abandoned-cart orders written automatically from
+// postbacks. See models/AbandonedCartOrder.js (the new per-order
+// collection) and models/AbandonedCartSettings.js (the new global
+// delivery-rate/cost config that replaces this model's per-record
+// deliveryRate/*Cost fields).
+//
+// Nothing in the app imports this file anymore (routes/abandonedCarts.js
+// now reads AbandonedCartOrder instead). It's left in place, untouched,
+// purely so any pre-existing "abandonedcarts" collection data from
+// before this phase is never destroyed by a migration — it's simply no
+// longer read from. Safe to delete once you've confirmed you don't need
+// that historical manually-entered data for anything.
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
 // Phase 22 — Abandoned Cart daily records.
 //
 // One document per calendar date (plain "YYYY-MM-DD" string, same

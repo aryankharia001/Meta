@@ -655,19 +655,27 @@ export async function deleteExpense(id) {
   return data; // { success }
 }
 
-// ─── Abandoned Carts (Phase 22) ────────────────────────────────────
-// New, additive routes at /api/abandoned-carts. Genuinely DB-backed
-// (Mongo), never localStorage — see AbandonedCartsPage.jsx and
-// Dashboard.jsx's Abandoned Cart section. fetchAbandonedCarts accepts
-// { since, until } (both optional, plain YYYY-MM-DD strings) — the
-// Management page calls it with no params for the full list, Dashboard
-// calls it with the currently-selected date range.
+// ─── Abandoned Carts (Phase 22, reworked in Phase 25) ──────────────
+// Routes at /api/abandoned-carts. Genuinely DB-backed (Mongo), never
+// localStorage — see AbandonedCartsPage.jsx and Dashboard.jsx's
+// Abandoned Cart section. As of Phase 25, records are REAL individual
+// abandoned-cart orders (written automatically by the
+// /abandon-cart-postback webhook — see server/routes/abandonCartPostback.js),
+// not manually-entered daily totals; there is no more createAbandonedCart.
+//
+// fetchAbandonedCarts accepts { since, until, search, page, pageSize }
+// (all optional, since/until are plain YYYY-MM-DD strings). Dashboard
+// calls it with just { since, until } and only ever reads `res.summary`
+// — that response shape/keys are unchanged from Phase 22, so Dashboard
+// needed no changes for this rework. The Management page additionally
+// uses search/page/pageSize and reads `res.records`/`res.total`/
+// `res.totalPages` for its server-side-paginated table.
 export async function fetchAbandonedCarts(params = {}) {
   const { data } = await api.get("/abandoned-carts", { params });
-  return data; // { success, records, summary }
+  return data; // { success, records, total, page, pageSize, totalPages, summary }
 }
-export async function createAbandonedCart(payload) {
-  const { data } = await api.post("/abandoned-carts", payload);
+export async function fetchAbandonedCart(id) {
+  const { data } = await api.get(`/abandoned-carts/${id}`);
   return data; // { success, record }
 }
 export async function updateAbandonedCart(id, payload) {
@@ -677,6 +685,16 @@ export async function updateAbandonedCart(id, payload) {
 export async function deleteAbandonedCart(id) {
   const { data } = await api.delete(`/abandoned-carts/${id}`);
   return data; // { success }
+}
+// §5 — global delivery rate + per-order cost settings (replaces the old
+// per-record deliveryRate/*Cost fields).
+export async function fetchAbandonedCartSettings() {
+  const { data } = await api.get("/abandoned-carts/settings");
+  return data; // { success, deliveryRate, manufacturingCost, packagingCost, shippingCost, miscCost }
+}
+export async function updateAbandonedCartSettings(payload) {
+  const { data } = await api.put("/abandoned-carts/settings", payload);
+  return data; // { success, deliveryRate, manufacturingCost, packagingCost, shippingCost, miscCost }
 }
 
 // ─── Profitability (Phase 16) ──────────────────────────────────────
