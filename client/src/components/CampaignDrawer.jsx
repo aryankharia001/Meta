@@ -119,6 +119,14 @@ const META_METRIC_DEFS = [
   { key: "cpm", label: "CPM", format: currency, tip: "Average cost per 1,000 impressions." },
   { key: "cpc", label: "CPC", format: currency, tip: "Average cost per click." },
   { key: "ctr", label: "CTR", format: percent, tip: "Click-through rate — clicks divided by impressions." },
+  // Phase 30 — Video Views / Hook Rate. videoViews is the 3-second video
+  // view count Meta reports (action_type "video_view", from
+  // video_play_actions or actions); hookRate is that count divided by
+  // impressions. Both show "N/A" when Meta didn't return the underlying
+  // 3s-video-view metric for this campaign/range — never approximated
+  // from a different metric (e.g. video_p25_watched_actions).
+  { key: "videoViews", label: "Video Views", format: number, tip: "3-second video views (action_type video_view) — Meta's standard 'hooked' viewer count." },
+  { key: "hookRate", label: "Hook Rate", format: percent, tip: "3-second video views divided by impressions — how well the ad's opening hooks viewers." },
   { key: "clicks", label: "Clicks", format: number, tip: "All clicks on the ad." },
   { key: "linkClicks", label: "Link Clicks", format: number, tip: "Clicks that led to the destination link." },
   { key: "landingPageViews", label: "Landing Page Views", format: number, tip: "Link clicks that loaded the landing page." },
@@ -206,6 +214,42 @@ function getStatOrders(key, orders) {
   }
   // totalOrders / matchedOrders / revenue — all orders in range.
   return orders;
+}
+
+// Phase 31 §2 — Consolidated Campaign Budget. A Meta campaign either
+// carries a genuine campaign-level budget (daily_budget/lifetime_budget
+// set directly on the Campaign object — details.campaign.budget, as
+// deriveBudget() in campaigns.js already exposes it) or uses
+// Advantage+/CBO-off ad-set-level budgeting, where the Campaign object's
+// own budget fields are null/absent and each Ad Set carries its own
+// budget instead (adSetExplorer.js's by-campaign endpoint now returns
+// budget/budgetType per ad set — see Phase 31 §2a). Never adds the two
+// together, and never sums a daily ad-set budget with a lifetime one —
+// each cadence is summed separately and shown separately.
+function consolidatedCampaignBudget(campaign, adSets) {
+  if (campaign && campaign.budget !== null && campaign.budget !== undefined) {
+    return { display: formatBudget(campaign.budget, campaign.budgetType) || "N/A", source: "campaign" };
+  }
+
+  const withBudget = (adSets || []).filter((a) => a.budget !== null && a.budget !== undefined);
+  if (withBudget.length === 0) return { display: "N/A", source: "none" };
+
+  let dailyTotal = 0, hasDaily = false;
+  let lifetimeTotal = 0, hasLifetime = false;
+  withBudget.forEach((a) => {
+    if (a.budgetType === "daily") {
+      dailyTotal += Number(a.budget) || 0;
+      hasDaily = true;
+    } else if (a.budgetType === "lifetime") {
+      lifetimeTotal += Number(a.budget) || 0;
+      hasLifetime = true;
+    }
+  });
+
+  const parts = [];
+  if (hasDaily) parts.push(formatBudget(dailyTotal, "daily"));
+  if (hasLifetime) parts.push(formatBudget(lifetimeTotal, "lifetime"));
+  return { display: parts.length ? parts.join(" + ") : "N/A", source: "adsets" };
 }
 
 export default function CampaignDrawer() {
@@ -342,6 +386,15 @@ export default function CampaignDrawer() {
   }, [open]);
 
   // ── Derived data ─────────────────────────────────────────────
+
+  // Phase 31 §2 — recomputed from whatever campaignAdSets/details.campaign
+  // currently hold, so it always reflects the latest fetch (the refresh
+  // button/live-sync refetch above already re-runs both fetches; nothing
+  // here caches a stale copy independently).
+  const budgetInfo = useMemo(
+    () => consolidatedCampaignBudget(details?.campaign, campaignAdSets),
+    [details?.campaign, campaignAdSets]
+  );
 
   const kpiValues = useMemo(() => {
     if (!details) return null;
@@ -713,7 +766,15 @@ export default function CampaignDrawer() {
 
               {/* Campaign info strip */}
               <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-xs text-slate-500">
-                <InfoBit icon={Wallet} label="Budget" value={formatBudget(details.campaign.budget, details.campaign.budgetType) || "N/A"} />
+                {/* Phase 31 §2 — consolidated budget: the genuine Meta
+                    campaign-level budget when set, else the sum of each
+                    ad set's own budget (grouped by daily/lifetime cadence,
+                    never added together — see consolidatedCampaignBudget()). */}
+                <InfoBit
+                  icon={Wallet}
+                  label={budgetInfo.source === "adsets" ? "Campaign Budget (Ad Set Sum)" : "Campaign Budget"}
+                  value={budgetInfo.display}
+                />
                 <InfoBit icon={Target} label="Objective" value={details.campaign.objective || "N/A"} />
                 <InfoBit icon={Tag} label="Buying Type" value={details.campaign.buyingType || "N/A"} />
                 <InfoBit icon={Building2} label="Ad Account" value={activeCampaign?.accountName || details.campaign.accountId || "N/A"} />
@@ -966,7 +1027,13 @@ export default function CampaignDrawer() {
                     <div className="overflow-x-auto -mx-4">
                       <table className="table">
                         <thead>
-                          <tr><th>Ad Set</th><th>Status</th><th className="text-right">Spend</th><th className="text-right">ROAS</th><th className="text-right">Orders</th><th className="text-right">Revenue</th></tr>
+                          <tr>
+                            <th>Ad Set</th><th>Status</th>
+                            {/* Phase 31 §2c — per-ad-set budget, alongside the
+                                consolidated total shown in the header strip. */}
+                            <th className="text-right">Budget</th>
+                            <th className="text-right">Spend</th><th className="text-right">ROAS</th><th className="text-right">Orders</th><th className="text-right">Revenue</th>
+                          </tr>
                         </thead>
                         <tbody>
                           {campaignAdSets.map((a) => (
@@ -987,6 +1054,7 @@ export default function CampaignDrawer() {
                             >
                               <td className="font-medium text-slate-700">{a.adsetName}</td>
                               <td>{a.effectiveStatus || a.status || "N/A"}</td>
+                              <td className="text-right">{formatBudget(a.budget, a.budgetType) || "N/A"}</td>
                               <td className="text-right">{currency(a.spend)}</td>
                               <td className={`text-right ${roasClass(a.roas)}`}>{multiplier(a.roas)}</td>
                               <td className="text-right">{a.totalOrders}</td>

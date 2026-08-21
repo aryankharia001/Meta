@@ -30,6 +30,10 @@ export const AD_SET_COLUMNS = [
   { key: "purchases", label: "Purchases", group: "Performance", align: "right", render: (r) => number(r.purchases) },
   { key: "purchaseValue", label: "Revenue (Meta)", group: "Performance", align: "right", render: (r) => currency(r.purchaseValue) },
   { key: "roas", label: "ROAS", group: "Performance", align: "right", render: (r) => multiplier(r.roas) },
+  // Phase 30 — Video Views / Hook Rate, so ad sets can be sorted/compared
+  // by hook rate alongside Campaigns and Ads.
+  { key: "videoViews", label: "Video Views", group: "Performance", align: "right", render: (r) => number(r.videoViews) },
+  { key: "hookRate", label: "Hook Rate", group: "Performance", align: "right", render: (r) => percent(r.hookRate) },
 
   { key: "totalOrders", label: "Total Orders", group: "Orders", align: "right", render: (r) => number(r.totalOrders) },
   { key: "matchedOrders", label: "Matched Orders", group: "Orders", align: "right", render: (r) => number(r.matchedOrders) },

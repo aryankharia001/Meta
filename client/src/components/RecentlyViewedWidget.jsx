@@ -4,6 +4,7 @@ import { getRecentlyViewed, subscribeRecentlyViewed, clearRecentlyViewed } from 
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useCustomerDrawer } from "../lib/CustomerDrawerContext";
+import { todayIso } from "../lib/dateIst";
 
 // Phase 7 — Recently Viewed widget, shown on the Dashboard. Reads
 // straight from localStorage via recentlyViewed.js and re-renders
@@ -16,11 +17,12 @@ const TYPE_META = {
   customer: { icon: User, accent: "bg-emerald-50 text-emerald-600" },
 };
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Phase 31 §1 — defaults to Today (IST) via the shared dateIst.js helper,
+// same as every other normal campaign-drawer launch point. The drawer's
+// own date-range picker still lets the user switch ranges afterward.
 function defaultCampaignRange() {
-  const until = new Date().toISOString().slice(0, 10);
-  const since = new Date(Date.now() - 365 * DAY_MS).toISOString().slice(0, 10);
-  return { since, until };
+  const today = todayIso();
+  return { since: today, until: today };
 }
 
 export default function RecentlyViewedWidget() {

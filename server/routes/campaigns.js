@@ -599,6 +599,25 @@ function findActionValue(list, types) {
   return null;
 }
 
+// Phase 30 — Hook Rate (3-second video views / impressions). Duplicated
+// byte-identically in campaignExplorer.js/adSetExplorer.js/adExplorer.js
+// so hook rate is genuinely comparable Campaign → Ad Set → Ad — see
+// campaignExplorer.js's copy for the full explanation. Never falls back
+// to a different metric (e.g. video_p25_watched_actions) when the true
+// 3s metric is absent; returns null (rendered "N/A" client-side) instead.
+function extractThreeSecVideoViews(actions, videoPlayActions) {
+  const fromVideoPlayActions = findActionValue(videoPlayActions, ["video_view"]);
+  if (fromVideoPlayActions !== null) return fromVideoPlayActions;
+  const fromActions = findActionValue(actions, ["video_view"]);
+  if (fromActions !== null) return fromActions;
+  return null;
+}
+
+function computeHookRate(threeSecVideoViews, impressions) {
+  if (threeSecVideoViews == null || !impressions) return null;
+  return (threeSecVideoViews / impressions) * 100;
+}
+
 // Shiprocket's raw order payload shape for product lines / courier /
 // shipment status isn't unpacked anywhere else in this codebase (the
 // `raw` field is stored as-is — see extractOrderFields in
@@ -759,6 +778,8 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       "cost_per_action_type",
       "frequency",
       "purchase_roas",
+      // Phase 30 — Hook Rate / Video Views. See extractThreeSecVideoViews().
+      "video_play_actions",
     ].join(",");
 
     let metaInsights = null;
@@ -773,10 +794,13 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       const row = (insightsData.data || [])[0] || null;
 
       if (row) {
+        const impressionsNum = row.impressions != null ? Number(row.impressions) : null;
+        // Phase 30 — Hook Rate / Video Views.
+        const threeSecVideoViews = extractThreeSecVideoViews(row.actions, row.video_play_actions);
         metaInsights = {
           spend: row.spend != null ? Number(row.spend) : null,
           reach: row.reach != null ? Number(row.reach) : null,
-          impressions: row.impressions != null ? Number(row.impressions) : null,
+          impressions: impressionsNum,
           cpm: row.cpm != null ? Number(row.cpm) : null,
           cpc: row.cpc != null ? Number(row.cpc) : null,
           ctr: row.ctr != null ? Number(row.ctr) : null,
@@ -788,6 +812,8 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
           costPerPurchase: findActionValue(row.cost_per_action_type, ["purchase", "omni_purchase"]),
           frequency: row.frequency != null ? Number(row.frequency) : null,
           purchaseRoas: findActionValue(row.purchase_roas, ["omni_purchase", "purchase"]),
+          videoViews: threeSecVideoViews,
+          hookRate: computeHookRate(threeSecVideoViews, impressionsNum),
         };
       }
     } catch (err) {

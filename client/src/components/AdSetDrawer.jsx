@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import {
   X, RefreshCw, AlertTriangle, Layers, Target, Wallet, Gauge, Package,
   CreditCard, Truck, PackageCheck, Clock, RotateCcw, Calendar, Megaphone, Users, Clock4,
+  Video, Anchor,
 } from "lucide-react";
 import { fetchAdSetDetails, fetchAdSetOrders, fetchAdsByAdSet } from "../lib/api";
 import { useAdSetDrawer } from "../lib/AdSetDrawerContext";
 import { useAdDrawer } from "../lib/AdDrawerContext";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
-import { currency, number, multiplier, formatDate } from "../lib/format";
+import { currency, number, multiplier, percent, formatDate } from "../lib/format";
 import { roasClass, statusBadgeClass, formatBudget } from "../lib/campaignDisplay";
 import { AdThumbnail } from "./AdCells";
 import HourlyPanel from "./hourly/HourlyPanel";
@@ -158,6 +159,10 @@ export default function AdSetDrawer() {
                   <div className="flex flex-wrap gap-3">
                     <Kpi icon={Wallet} label="Spend" value={currency(metrics?.spend)} />
                     <Kpi icon={Gauge} label="ROAS" value={multiplier(metrics?.roas)} />
+                    {/* Phase 30 — Video Views / Hook Rate, "N/A" when Meta
+                        didn't return a 3-second video-view metric. */}
+                    <Kpi icon={Video} label="Video Views" value={number(metrics?.videoViews)} />
+                    <Kpi icon={Anchor} label="Hook Rate" value={percent(metrics?.hookRate)} />
                     <Kpi icon={Package} label="Total Orders" value={number(orderMetrics?.totalOrders)} />
                     <Kpi icon={CreditCard} label="Revenue" value={currency(orderMetrics?.revenue)} />
                     <Kpi icon={Truck} label="COD" value={number(orderMetrics?.codOrders)} />

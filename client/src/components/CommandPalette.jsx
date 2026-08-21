@@ -6,6 +6,7 @@ import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useCustomerDrawer } from "../lib/CustomerDrawerContext";
 import { currency, formatDate } from "../lib/format";
+import { todayIso } from "../lib/dateIst";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 7 — Global Command Palette (Ctrl/Cmd+K). Talks only to the new,
@@ -16,13 +17,16 @@ import { currency, formatDate } from "../lib/format";
 // scoped to a Meta token in Mongo), so opening a campaign/order here
 // uses the currently-selected token from useSelectedToken() — the same
 // "current token" every other page already operates against.
+//
+// Phase 31 §1 — opening a campaign result now defaults to Today (IST) via
+// the shared dateIst.js helper, same as every other normal launch point.
+// The drawer's own date-range picker still lets the user switch ranges
+// afterward.
 // ────────────────────────────────────────────────────────────────
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 function defaultCampaignRange() {
-  const until = new Date().toISOString().slice(0, 10);
-  const since = new Date(Date.now() - 365 * DAY_MS).toISOString().slice(0, 10);
-  return { since, until };
+  const today = todayIso();
+  return { since: today, until: today };
 }
 
 export default function CommandPalette({ open, onClose }) {

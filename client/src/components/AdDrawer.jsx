@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import {
   X, RefreshCw, AlertTriangle, Megaphone, Wallet, Gauge, Package,
   CreditCard, Truck, PackageCheck, Clock, RotateCcw, Users, Image as ImageIcon, ExternalLink,
+  Video, Anchor,
 } from "lucide-react";
 import { fetchAdDetails, fetchAdOrders, fetchAdCreative } from "../lib/api";
 import { useAdDrawer } from "../lib/AdDrawerContext";
 import { useAdSetDrawer } from "../lib/AdSetDrawerContext";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
-import { currency, number, multiplier, formatDate } from "../lib/format";
+import { currency, number, multiplier, percent, formatDate } from "../lib/format";
 import { roasClass, statusBadgeClass } from "../lib/campaignDisplay";
 import { AdThumbnail } from "./AdCells";
 import { shapeOrdersForPopup } from "../lib/shapeOrder";
@@ -145,6 +146,30 @@ export default function AdDrawer() {
 
               {!loading && details && (
                 <>
+                  {/* Phase 30 — Hook Rate, shown prominently near the ad
+                      thumbnail/name (same "highlight the headline number"
+                      treatment CampaignDrawer.jsx gives ROAS), not buried
+                      in the generic metric grid below. "N/A" whenever
+                      Meta didn't return a genuine 3-second video-view
+                      metric for this ad/range — never approximated from a
+                      different metric. */}
+                  <div className="card !p-4 flex items-center gap-4 bg-indigo-50/60 border-indigo-100">
+                    <span className="flex items-center justify-center w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-600 shrink-0">
+                      <Anchor size={22} />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="text-xs text-indigo-500 font-medium">Hook Rate</div>
+                      <div className="text-2xl font-display font-bold text-indigo-700 truncate">{percent(metrics?.hookRate)}</div>
+                      <div className="text-[11px] text-indigo-400 mt-0.5">3-second video views ÷ impressions</div>
+                    </div>
+                    <div className="ml-auto text-right shrink-0">
+                      <div className="text-[11px] text-indigo-400 flex items-center gap-1 justify-end">
+                        <Video size={11} /> Video Views
+                      </div>
+                      <div className="text-base font-semibold text-indigo-700">{number(metrics?.videoViews)}</div>
+                    </div>
+                  </div>
+
                   {ad?.metaAvailable === false && (
                     <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
                       <AlertTriangle size={14} /> Meta metadata for this ad isn't available (deleted, or the token doesn't have access). Order data below is still shown from Shiprocket's stored attribution.

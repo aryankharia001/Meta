@@ -53,6 +53,10 @@ export const COLUMN_GROUPS = [
       { key: "purchases", label: "Purchases", defaultWidth: 100, align: "right", render: (c) => number(c.purchases) },
       { key: "purchaseValue", label: "Purchase Value", defaultWidth: 130, align: "right", render: (c) => currency(c.purchaseValue) },
       { key: "roas", label: "ROAS", defaultWidth: 90, align: "right", render: (c) => multiplier(c.roas) },
+      // Phase 30 — Video Views / Hook Rate, so campaigns can be sorted/
+      // compared by hook rate alongside Ad Sets and Ads.
+      { key: "videoViews", label: "Video Views", defaultWidth: 110, align: "right", render: (c) => number(c.videoViews) },
+      { key: "hookRate", label: "Hook Rate", defaultWidth: 100, align: "right", render: (c) => percent(c.hookRate) },
     ],
   },
   {

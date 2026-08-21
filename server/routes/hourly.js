@@ -102,6 +102,51 @@ export async function fetchHourlySpend({ objectId, accountIds, accessToken, date
   return { available: any, byHour, error: any ? null : lastError };
 }
 
+// Phase 30 — Hook Rate for the Hourly Panel. A separate, local fetch
+// (never touching fetchHourlySpend() above, which Phase 27's
+// controlHelpers.js depends on for its own before/after and hourly-with-
+// controls endpoints) so adding a video-views field here can never
+// change Phase 27's behavior. Same "3-second video views" probing as
+// campaignExplorer.js/campaigns.js/adSetExplorer.js/adExplorer.js's
+// extractThreeSecVideoViews() — duplicated here for the same "zero
+// coupling between phases" reason, and byte-identical in formula.
+async function fetchHourlyVideoViews({ objectId, accountIds, accessToken, date }) {
+  const fields = "impressions,actions,video_play_actions";
+  const breakdown = "hourly_stats_aggregated_by_advertiser_time_zone";
+  const timeRange = encodeURIComponent(JSON.stringify({ since: date, until: date }));
+
+  const urls = objectId
+    ? [`${GRAPH_BASE}/${objectId}/insights?fields=${encodeURIComponent(fields)}&breakdowns=${breakdown}&time_range=${timeRange}&limit=500&access_token=${accessToken}`]
+    : (accountIds || []).map(
+        (id) => `${GRAPH_BASE}/${actIdOf(id)}/insights?level=account&fields=${encodeURIComponent(fields)}&breakdowns=${breakdown}&time_range=${timeRange}&limit=500&access_token=${accessToken}`
+      );
+
+  const byHour = new Map();
+  for (const url of urls) {
+    try {
+      const data = await fbGet(url);
+      (data.data || []).forEach((row) => {
+        const label = row.hourly_stats_aggregated_by_advertiser_time_zone || "";
+        const hour = parseInt(String(label).slice(0, 2), 10);
+        if (isNaN(hour) || hour < 0 || hour > 23) return;
+        const cur = byHour.get(hour) || { impressions: 0, videoViews: 0, hasVideoData: false };
+        cur.impressions += Number(row.impressions || 0);
+        const fromVideoPlayActions = findActionValue(row.video_play_actions, ["video_view"]);
+        const fromActions = findActionValue(row.actions, ["video_view"]);
+        const views = fromVideoPlayActions !== null ? fromVideoPlayActions : fromActions;
+        if (views !== null) {
+          cur.videoViews += views;
+          cur.hasVideoData = true;
+        }
+        byHour.set(hour, cur);
+      });
+    } catch (err) {
+      console.log(`Hourly video-views fetch failed: ${err.message}`);
+    }
+  }
+  return byHour;
+}
+
 async function getKnownCampaignNames(accountIds, accessToken) {
   const names = new Set();
   for (const accountId of accountIds || []) {
@@ -167,6 +212,13 @@ router.get("/:tokenId", async (req, res) => {
       accessToken: token.accessToken,
       date,
     });
+    // Phase 30 — Hook Rate, fetched separately from fetchHourlySpend() so
+    // Phase 27's controlHelpers.js callers of that function are never
+    // affected. Best-effort: an empty Map just means every hour's
+    // hookRate/videoViews comes back null below.
+    const videoByHour = metaHourlyAvailable
+      ? await fetchHourlyVideoViews({ objectId: scope.objectId, accountIds, accessToken: token.accessToken, date })
+      : new Map();
 
     const dayOrders = await ShiprocketOrder.find({ orderDate: date })
       .select("orderId orderCreatedAt campaignName adsetId adId totalAmountPayable paymentType raw")
@@ -205,6 +257,12 @@ router.get("/:tokenId", async (req, res) => {
       });
       revenue = Math.round(revenue * 100) / 100;
 
+      // Phase 30 — Hook Rate for this hour. "N/A" (null) whenever the
+      // video-views fetch found no video_view data for this hour, rather
+      // than showing a misleading 0%.
+      const videoRow = videoByHour.get(h);
+      const hookRate = videoRow?.hasVideoData && videoRow.impressions ? (videoRow.videoViews / videoRow.impressions) * 100 : null;
+
       hours.push({
         hour: h,
         label: hourLabel(h),
@@ -221,6 +279,8 @@ router.get("/:tokenId", async (req, res) => {
         roas: spend ? Math.round((revenue / spend) * 100) / 100 : 0,
         aov: ordersInHour.length ? Math.round((revenue / ordersInHour.length) * 100) / 100 : 0,
         cpa: ordersInHour.length ? Math.round((spend / ordersInHour.length) * 100) / 100 : 0,
+        videoViews: videoRow?.hasVideoData ? videoRow.videoViews : null,
+        hookRate,
       });
     }
 

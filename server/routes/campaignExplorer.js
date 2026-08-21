@@ -83,6 +83,30 @@ function findActionValue(list, types) {
   return null;
 }
 
+// Phase 30 — Hook Rate (3-second video views / impressions). Meta's real
+// "3-Second Video Views" number comes back as action_type "video_view"
+// on either the `actions` list or the dedicated `video_play_actions`
+// field, depending on API version/fields requested — probe both and
+// never fall back to a different metric (e.g. video_p25_watched_actions)
+// if neither is present, per the explicit "N/A rather than invent a
+// value" requirement. Duplicated byte-identically in campaigns.js/
+// adSetExplorer.js/adExplorer.js so hook rate is genuinely comparable
+// Campaign → Ad Set → Ad — same "zero coupling between phases"
+// convention this file's header already established for its other
+// helpers.
+function extractThreeSecVideoViews(actions, videoPlayActions) {
+  const fromVideoPlayActions = findActionValue(videoPlayActions, ["video_view"]);
+  if (fromVideoPlayActions !== null) return fromVideoPlayActions;
+  const fromActions = findActionValue(actions, ["video_view"]);
+  if (fromActions !== null) return fromActions;
+  return null;
+}
+
+function computeHookRate(threeSecVideoViews, impressions) {
+  if (threeSecVideoViews == null || !impressions) return null;
+  return (threeSecVideoViews / impressions) * 100;
+}
+
 const normalizeCampaignName = (name) =>
   String(name || "")
     .trim()
@@ -218,6 +242,8 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
   const insightFields = [
     "campaign_id", "campaign_name", "spend", "impressions", "reach", "clicks",
     "ctr", "cpc", "cpm", "frequency", "actions", "action_values", "purchase_roas",
+    // Phase 30 — Hook Rate / Video Views. See extractThreeSecVideoViews().
+    "video_play_actions",
   ].join(",");
 
   const metaByCampaignId = new Map(); // campaignId -> { meta, insights, accountId }
@@ -294,6 +320,9 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
     const cpm = Number(insights?.cpm || 0);
     const purchases = findActionValue(insights?.actions, ["purchase", "omni_purchase"]) || 0;
     const purchaseValue = findActionValue(insights?.action_values, ["purchase", "omni_purchase"]) || 0;
+    // Phase 30 — Hook Rate / Video Views.
+    const threeSecVideoViews = extractThreeSecVideoViews(insights?.actions, insights?.video_play_actions);
+    const hookRate = computeHookRate(threeSecVideoViews, impressions);
 
     // Campaign's own active window, for "outside selected campaign date
     // range" — an order that name-matched this campaign but happened
@@ -379,6 +408,9 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       spend, reach, impressions, clicks, ctr, cpc, cpm,
       purchases, purchaseValue,
       roas,
+      // Phase 30 — Video Views / Hook Rate.
+      videoViews: threeSecVideoViews,
+      hookRate,
 
       totalOrders,
       matchedOrders,

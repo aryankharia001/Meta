@@ -61,7 +61,30 @@ const AD_INSIGHT_FIELDS = [
   "ad_id", "ad_name", "adset_id", "campaign_id", "campaign_name",
   "spend", "impressions", "reach", "clicks", "ctr", "cpc", "cpm",
   "actions", "action_values",
+  // Phase 30 — Hook Rate / Video Views. See extractThreeSecVideoViews()
+  // below.
+  "video_play_actions",
 ].join(",");
+
+// Phase 30 — Hook Rate (3-second video views / impressions), duplicated
+// byte-identically across campaignExplorer.js/campaigns.js/
+// adSetExplorer.js/adExplorer.js so hook rate is genuinely comparable
+// Campaign → Ad Set → Ad. See campaignExplorer.js's copy for the full
+// explanation. Never falls back to a different metric (e.g.
+// video_p25_watched_actions) when the true 3s metric is absent — returns
+// null (rendered "N/A" client-side) instead.
+function extractThreeSecVideoViews(actions, videoPlayActions) {
+  const fromVideoPlayActions = findActionValue(videoPlayActions, ["video_view"]);
+  if (fromVideoPlayActions !== null) return fromVideoPlayActions;
+  const fromActions = findActionValue(actions, ["video_view"]);
+  if (fromActions !== null) return fromActions;
+  return null;
+}
+
+function computeHookRate(threeSecVideoViews, impressions) {
+  if (threeSecVideoViews == null || !impressions) return null;
+  return (threeSecVideoViews / impressions) * 100;
+}
 
 const CREATIVE_FIELDS = [
   "id", "thumbnail_url", "image_url", "video_id", "body", "title",
@@ -211,7 +234,10 @@ router.get("/:tokenId", async (req, res) => {
       const orders = ordersByAdId.get(adId) || [];
 
       const spend = Number(insights?.spend || 0);
+      const impressions = Number(insights?.impressions || 0);
       const purchaseValue = findActionValue(insights?.action_values, ["purchase", "omni_purchase"]) || 0;
+      // Phase 30 — Hook Rate / Video Views.
+      const threeSecVideoViews = extractThreeSecVideoViews(insights?.actions, insights?.video_play_actions);
 
       let revenue = 0, codOrders = 0, prepaidOrders = 0;
       const delivery = { delivered: 0, pending: 0, processing: 0, cancelled: 0, returned: 0, rto: 0 };
@@ -238,7 +264,7 @@ router.get("/:tokenId", async (req, res) => {
         updatedTime: meta.updated_time || null,
 
         spend,
-        impressions: Number(insights?.impressions || 0),
+        impressions,
         reach: Number(insights?.reach || 0),
         clicks: Number(insights?.clicks || 0),
         ctr: Number(insights?.ctr || 0),
@@ -247,6 +273,9 @@ router.get("/:tokenId", async (req, res) => {
         purchases: findActionValue(insights?.actions, ["purchase", "omni_purchase"]) || 0,
         purchaseValue,
         roas: spend ? purchaseValue / spend : 0,
+        // Phase 30 — Video Views / Hook Rate.
+        videoViews: threeSecVideoViews,
+        hookRate: computeHookRate(threeSecVideoViews, impressions),
 
         totalOrders: orders.length,
         revenue: Math.round(revenue * 100) / 100,
@@ -410,7 +439,10 @@ router.get("/:tokenId/:adId/details", async (req, res) => {
     orders.forEach((o) => { delivery[deliveryBucket6(extractDeliveryStatus(o.raw))] += 1; });
 
     const spend = Number(insights?.spend || 0);
+    const impressionsNum = Number(insights?.impressions || 0);
     const purchaseValue = findActionValue(insights?.action_values, ["purchase", "omni_purchase"]) || 0;
+    // Phase 30 — Hook Rate / Video Views.
+    const threeSecVideoViews = insights ? extractThreeSecVideoViews(insights.actions, insights.video_play_actions) : null;
 
     res.json({
       success: true,
@@ -432,7 +464,7 @@ router.get("/:tokenId/:adId/details", async (req, res) => {
       metaInsights: insights
         ? {
             spend,
-            impressions: Number(insights.impressions || 0),
+            impressions: impressionsNum,
             reach: Number(insights.reach || 0),
             clicks: Number(insights.clicks || 0),
             ctr: Number(insights.ctr || 0),
@@ -440,6 +472,10 @@ router.get("/:tokenId/:adId/details", async (req, res) => {
             cpm: Number(insights.cpm || 0),
             purchaseValue,
             roas: spend ? purchaseValue / spend : 0,
+            // Phase 30 — Video Views / Hook Rate. Shown prominently in
+            // AdDrawer.jsx per spec.
+            videoViews: threeSecVideoViews,
+            hookRate: computeHookRate(threeSecVideoViews, impressionsNum),
           }
         : null,
       orders: {

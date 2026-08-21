@@ -71,7 +71,33 @@ const ADSET_INSIGHT_FIELDS = [
   "adset_id", "adset_name", "campaign_id", "campaign_name",
   "spend", "impressions", "reach", "clicks", "ctr", "cpc", "cpm",
   "actions", "action_values",
+  // Phase 30 — Hook Rate / Video Views. See extractThreeSecVideoViews()
+  // below.
+  "video_play_actions",
 ].join(",");
+
+// Phase 30 — Hook Rate (3-second video views / impressions), duplicated
+// byte-identically across campaignExplorer.js/campaigns.js/
+// adSetExplorer.js/adExplorer.js so hook rate is genuinely comparable
+// Campaign → Ad Set → Ad — see campaignExplorer.js's copy for the full
+// explanation. Kept as a local duplicate here (not added to
+// lib/metaGraph.js) even though this file already imports several other
+// helpers from there, specifically so the formula can never accidentally
+// drift between files via a shared edit. Never falls back to a different
+// metric (e.g. video_p25_watched_actions) when the true 3s metric is
+// absent — returns null (rendered "N/A" client-side) instead.
+function extractThreeSecVideoViews(actions, videoPlayActions) {
+  const fromVideoPlayActions = findActionValue(videoPlayActions, ["video_view"]);
+  if (fromVideoPlayActions !== null) return fromVideoPlayActions;
+  const fromActions = findActionValue(actions, ["video_view"]);
+  if (fromActions !== null) return fromActions;
+  return null;
+}
+
+function computeHookRate(threeSecVideoViews, impressions) {
+  if (threeSecVideoViews == null || !impressions) return null;
+  return (threeSecVideoViews / impressions) * 100;
+}
 
 // Best-effort, display-only summary of a targeting object — never used
 // for matching/attribution, purely descriptive text for the Ad Set
@@ -214,6 +240,9 @@ router.get("/:tokenId", async (req, res) => {
       const cpm = Number(insights?.cpm || 0);
       const purchases = findActionValue(insights?.actions, ["purchase", "omni_purchase"]) || 0;
       const purchaseValue = findActionValue(insights?.action_values, ["purchase", "omni_purchase"]) || 0;
+      // Phase 30 — Hook Rate / Video Views.
+      const threeSecVideoViews = extractThreeSecVideoViews(insights?.actions, insights?.video_play_actions);
+      const hookRate = computeHookRate(threeSecVideoViews, impressions);
 
       let revenue = 0, codOrders = 0, prepaidOrders = 0;
       const delivery = { delivered: 0, pending: 0, processing: 0, cancelled: 0, returned: 0, rto: 0 };
@@ -250,6 +279,9 @@ router.get("/:tokenId", async (req, res) => {
         spend, impressions, reach, clicks, ctr, cpc, cpm,
         purchases, purchaseValue,
         roas: spend ? purchaseValue / spend : 0,
+        // Phase 30 — Video Views / Hook Rate.
+        videoViews: threeSecVideoViews,
+        hookRate,
 
         totalOrders,
         matchedOrders: totalOrders,
@@ -348,6 +380,7 @@ router.get("/:tokenId/by-campaign/:campaignId", async (req, res) => {
       const adsetId = String(meta.id || "");
       const orders = ordersByAdset.get(adsetId) || [];
       const spend = Number(insights?.spend || 0);
+      const impressions = Number(insights?.impressions || 0);
       const purchaseValue = findActionValue(insights?.action_values, ["purchase", "omni_purchase"]) || 0;
       let revenue = 0, codOrders = 0, prepaidOrders = 0;
       orders.forEach((o) => {
@@ -355,14 +388,27 @@ router.get("/:tokenId/by-campaign/:campaignId", async (req, res) => {
         if (o.paymentType === "PREPAID") prepaidOrders += 1;
         else if (o.paymentType === "CASH_ON_DELIVERY") codOrders += 1;
       });
+      // Phase 31 §2a — each ad set's own budget, same deriveBudget()
+      // convention as campaigns.js/campaignExplorer.js, so the drawer can
+      // tell a genuine campaign-level budget apart from Advantage+/
+      // CBO-off ad-set-level budgeting and, when needed, sum the ad
+      // sets' own budgets into a consolidated campaign total. Read-only —
+      // never touches Phase 27's budget history/write endpoints.
+      const { budget, budgetType } = deriveBudget(meta);
+      // Phase 30 — Hook Rate / Video Views.
+      const threeSecVideoViews = extractThreeSecVideoViews(insights?.actions, insights?.video_play_actions);
       return {
         adsetId,
         adsetName: meta.name || insights?.adset_name || "Untitled Ad Set",
         status: meta.status || null,
         effectiveStatus: meta.effective_status || null,
+        budget,
+        budgetType,
         spend,
         purchaseValue,
         roas: spend ? purchaseValue / spend : 0,
+        videoViews: threeSecVideoViews,
+        hookRate: computeHookRate(threeSecVideoViews, impressions),
         totalOrders: orders.length,
         revenue: Math.round(revenue * 100) / 100,
         codOrders,
@@ -418,6 +464,8 @@ router.get("/:tokenId/:adsetId/details", async (req, res) => {
     const { budget, budgetType } = deriveBudget(meta);
     const spend = Number(insights?.spend || 0);
     const purchaseValue = findActionValue(insights?.action_values, ["purchase", "omni_purchase"]) || 0;
+    // Phase 30 — Hook Rate / Video Views.
+    const threeSecVideoViews = insights ? extractThreeSecVideoViews(insights.actions, insights.video_play_actions) : null;
 
     res.json({
       success: true,
@@ -453,6 +501,8 @@ router.get("/:tokenId/:adsetId/details", async (req, res) => {
             purchases: findActionValue(insights.actions, ["purchase", "omni_purchase"]) || 0,
             purchaseValue,
             roas: spend ? purchaseValue / spend : 0,
+            videoViews: threeSecVideoViews,
+            hookRate: computeHookRate(threeSecVideoViews, Number(insights.impressions || 0)),
           }
         : null,
       orders: {

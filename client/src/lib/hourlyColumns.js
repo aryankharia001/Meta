@@ -1,4 +1,4 @@
-import { currency, multiplier } from "./format";
+import { currency, multiplier, number, percent } from "./format";
 
 // Phase 13 §1/§17 — column definitions for the Hourly Performance table,
 // wired through the same useColumnPrefs/ColumnSettingsMenu/DataTable
@@ -18,6 +18,9 @@ export const HOURLY_COLUMNS = [
   { key: "roas", label: "ROAS", align: "right", render: (r) => multiplier(r.roas) },
   { key: "aov", label: "AOV", align: "right", render: (r) => currency(r.aov) },
   { key: "cpa", label: "CPA", align: "right", render: (r) => currency(r.cpa) },
+  // Phase 30 — Video Views / Hook Rate for this hour.
+  { key: "videoViews", label: "Video Views", align: "right", render: (r) => number(r.videoViews) },
+  { key: "hookRate", label: "Hook Rate", align: "right", render: (r) => percent(r.hookRate) },
 ];
 
 export const HOURLY_DEFAULT_HIDDEN = [];

@@ -1,9 +1,7 @@
 import axios from "axios";
 
-const API_BASE = import.meta.env.VITE_API_URL;
-
 export const api = axios.create({
-  baseURL: API_BASE,
+  baseURL: "/api",
   headers: { "Content-Type": "application/json" },
   // Phase 14 §3 — required so the browser sends/receives the httpOnly
   // session cookie set by POST /api/auth/login. Every existing call in

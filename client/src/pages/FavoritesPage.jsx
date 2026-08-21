@@ -5,6 +5,7 @@ import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useCustomerDrawer } from "../lib/CustomerDrawerContext";
 import { formatDateTime } from "../lib/format";
+import { todayIso } from "../lib/dateIst";
 import FavoriteButton from "../components/FavoriteButton";
 import DataTable from "../components/DataTable";
 
@@ -12,18 +13,19 @@ import DataTable from "../components/DataTable";
 // Phase 7 — Favorites page: the "Favorites section" the spec calls for,
 // listing everything starred across campaigns/orders/customers. Reads
 // from the same FavoritesContext the star buttons in each drawer write
-// to, grouped by entity type. Opening a favorited campaign has no
-// saved date range to reuse (favoriting is an identity, not a
-// snapshot), so it defaults to a broad last-365-days window — same
-// fallback idea as a bookmark taking you to an item's default view.
+// to, grouped by entity type.
+//
+// Phase 31 §1 — opening a favorited campaign now defaults to Today (IST),
+// same as every other normal launch point (Dashboard, Campaign Explorer,
+// etc. all already default their own date filter to "today"), reusing
+// the shared dateIst.js helper rather than hand-rolling date math. The
+// drawer's own date-range picker is untouched — the user can still
+// switch to 7 Days/30 Days/Custom after opening.
 // ────────────────────────────────────────────────────────────────
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 function defaultRange() {
-  const until = new Date().toISOString().slice(0, 10);
-  const since = new Date(Date.now() - 365 * DAY_MS).toISOString().slice(0, 10);
-  return { since, until };
+  const today = todayIso();
+  return { since: today, until: today };
 }
 
 export default function FavoritesPage() {
