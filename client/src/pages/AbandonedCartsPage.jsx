@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   ShoppingBag,
@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Settings2,
   ExternalLink,
+  Download,
 } from "lucide-react";
 import {
   fetchAbandonedCarts,
@@ -25,6 +26,7 @@ import {
   updateAbandonedCartSettings,
 } from "../lib/api";
 import { currency as formatCurrency, number as formatNumber, formatDateTime } from "../lib/format";
+import { downloadCsv } from "../lib/csv";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 25 — Store & Fetch Real Abandoned Cart Orders. Replaces Phase
@@ -54,6 +56,50 @@ const shiftDays = (dateStr, days) => {
 };
 
 const PAGE_SIZES = [10, 25, 50, 100];
+
+// ────────────────────────────────────────────────────────────────
+// Filters — quick presets + persistence across navigation.
+//
+// Quick presets (Today / Yesterday / 7 Days / 30 Days) apply and fetch
+// immediately when clicked. The custom date-range inputs, in contrast,
+// only stage a DRAFT value locally — nothing is fetched until "Apply"
+// is pressed, so typing/picking a date doesn't fire a request per
+// keystroke/click.
+//
+// Persistence: this page fully unmounts when the user navigates to a
+// different menu (React Router swaps the route), which would normally
+// reset all of this back to its defaults. To survive that, the current
+// filters/search/page are mirrored into sessionStorage on every change
+// and read back once on mount — so returning to this page (without a
+// full browser reload) picks up right where the user left off. An
+// explicit ?since=&until= deep link (e.g. from the Dashboard) still
+// takes priority over whatever was last persisted.
+// ────────────────────────────────────────────────────────────────
+const FILTERS_STORAGE_KEY = "abandonedCartsPage.filters.v1";
+
+function loadPersistedFilters() {
+  try {
+    const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedFilters(state) {
+  try {
+    sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore — private browsing / storage disabled, filters just won't persist
+  }
+}
+
+const PRESETS = [
+  { key: "today", label: "Today", range: () => [todayIso(), todayIso()] },
+  { key: "yesterday", label: "Yesterday", range: () => [shiftDays(todayIso(), -1), shiftDays(todayIso(), -1)] },
+  { key: "7d", label: "7 Days", range: () => [shiftDays(todayIso(), -6), todayIso()] },
+  { key: "30d", label: "30 Days", range: () => [shiftDays(todayIso(), -29), todayIso()] },
+];
 
 function productSummary(items) {
   if (!items || items.length === 0) return { label: "—", title: "" };
@@ -534,15 +580,52 @@ export default function AbandonedCartsPage() {
   // mount, via useState's lazy initializer — never re-synced afterwards,
   // so the page's own date controls remain the single source of truth for
   // this page from that point on, exactly like every other filter here).
-  // Falls back to the existing default (last 30 days) when the page is
-  // opened directly, unchanged from before.
+  // Falls back to the default (today) when the page is opened directly.
   const [searchParams] = useSearchParams();
-  const [since, setSince] = useState(() => searchParams.get("since") || shiftDays(todayIso(), -29));
-  const [until, setUntil] = useState(() => searchParams.get("until") || todayIso());
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  // Read once, on mount: a deep link (?since=&until=) wins over whatever
+  // was last persisted for this page, which in turn wins over the
+  // hard-coded "today" default.
+  const [persisted] = useState(() => loadPersistedFilters());
+  const [since, setSince] = useState(() => searchParams.get("since") || persisted?.since || todayIso());
+  const [until, setUntil] = useState(() => searchParams.get("until") || persisted?.until || todayIso());
+  // Draft values for the custom date-range inputs — only committed to
+  // since/until (which is what actually triggers a fetch) when "Apply"
+  // is pressed.
+  const [sinceDraft, setSinceDraft] = useState(since);
+  const [untilDraft, setUntilDraft] = useState(until);
+  const [searchInput, setSearchInput] = useState(() => persisted?.searchInput || "");
+  const [search, setSearch] = useState(() => persisted?.search || "");
+  const [page, setPage] = useState(() => persisted?.page || 1);
+  const [pageSize, setPageSize] = useState(() => persisted?.pageSize || 25);
+
+  const activePresetKey = useMemo(() => {
+    const match = PRESETS.find((p) => {
+      const [s, u] = p.range();
+      return s === since && u === until;
+    });
+    return match?.key || null;
+  }, [since, until]);
+
+  const applyPreset = (preset) => {
+    const [s, u] = preset.range();
+    setSince(s);
+    setUntil(u);
+    setSinceDraft(s);
+    setUntilDraft(u);
+  };
+
+  const hasPendingRange = sinceDraft !== since || untilDraft !== until;
+  const applyCustomRange = () => {
+    if (!sinceDraft || !untilDraft || !hasPendingRange) return;
+    setSince(sinceDraft);
+    setUntil(untilDraft);
+  };
+
+  // Persist filters/search/page so they survive navigating away to
+  // another menu and back (see header comment on FILTERS_STORAGE_KEY).
+  useEffect(() => {
+    savePersistedFilters({ since, until, searchInput, search, page, pageSize });
+  }, [since, until, searchInput, search, page, pageSize]);
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -554,10 +637,18 @@ export default function AbandonedCartsPage() {
   const [editId, setEditId] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState("");
+  const [exporting, setExporting] = useState(false);
 
   // §3/§9 — debounce the search box so every keystroke doesn't fire a
-  // network request.
+  // network request. Skipped on the very first run so restoring a
+  // persisted `searchInput`/`page` on mount doesn't immediately reset
+  // the page back to 1.
+  const isFirstSearchRun = useRef(true);
   useEffect(() => {
+    if (isFirstSearchRun.current) {
+      isFirstSearchRun.current = false;
+      return;
+    }
     const t = setTimeout(() => {
       setPage(1);
       setSearch(searchInput.trim());
@@ -565,7 +656,16 @@ export default function AbandonedCartsPage() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  useEffect(() => setPage(1), [since, until, pageSize]);
+  // Same reasoning — don't clobber a restored `page` the instant this
+  // page mounts with its restored since/until/pageSize.
+  const isFirstRangeRun = useRef(true);
+  useEffect(() => {
+    if (isFirstRangeRun.current) {
+      isFirstRangeRun.current = false;
+      return;
+    }
+    setPage(1);
+  }, [since, until, pageSize]);
 
   const load = (background = false) => {
     if (background) setRefreshing(true);
@@ -601,6 +701,69 @@ export default function AbandonedCartsPage() {
     }
   };
 
+  // Export — a CSV of every record matching the CURRENT since/until/
+  // search filters (not just the page on screen), opens directly in
+  // Excel. Walks every page at the server's max page size rather than
+  // relying on whatever `pageSize` the table is currently set to.
+  const handleExport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setActionError("");
+    try {
+      const all = [];
+      let p = 1;
+      let pages = 1;
+      do {
+        const res = await fetchAbandonedCarts({ since, until, search, page: p, pageSize: 200 });
+        all.push(...(res.records || []));
+        pages = res.totalPages || 1;
+        p += 1;
+      } while (p <= pages);
+
+      const rows = [
+        [
+          "Date / Time",
+          "Customer",
+          "Phone",
+          "Email",
+          "Cart ID",
+          "Order ID",
+          "Abandoned Cart ID",
+          "Product",
+          "Amount",
+          "Campaign",
+          "Adset",
+          "Ad",
+          "Payment Status",
+          "Pincode",
+          "Checkout URL",
+        ],
+        ...all.map((r) => [
+          formatDateTime(r.orderTimestamp),
+          r.customerName || "",
+          r.phone || "",
+          r.email || "",
+          r.cartId || "",
+          r.externalOrderId || "",
+          r.abandonedCartId || "",
+          productSummary(r.items).label,
+          r.cartValue ?? 0,
+          r.utmCampaign || "",
+          r.adsetName || "",
+          r.adId || "",
+          r.paymentStatus || "",
+          r.pincode || "",
+          r.checkoutUrl || "",
+        ]),
+      ];
+      downloadCsv(`abandoned-carts-${since}-to-${until}.csv`, rows);
+    } catch (err) {
+      setActionError(err.message || "Failed to export abandoned cart records");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between gap-2.5 flex-wrap">
@@ -622,6 +785,9 @@ export default function AbandonedCartsPage() {
         <div className="flex items-center gap-2.5">
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => setSettingsOpen((v) => !v)}>
             <Settings2 size={13} /> Settings
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={handleExport} disabled={exporting || total === 0}>
+            {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} {exporting ? "Exporting…" : "Export"}
           </button>
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => load(true)} disabled={refreshing}>
             <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
@@ -651,18 +817,42 @@ export default function AbandonedCartsPage() {
           <CalendarRange size={13} />
           Date range
         </div>
-        <input type="date" className="input w-auto !py-1.5 !text-xs" value={since} max={until || undefined} onChange={(e) => setSince(e.target.value)} />
+        <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-0.5">
+          {PRESETS.map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                activePresetKey === p.key ? "bg-white text-indigo-600 shadow-sm font-medium" : "text-slate-500 hover:text-slate-700"
+              }`}
+              onClick={() => applyPreset(p)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <input
+          type="date"
+          className="input w-auto !py-1.5 !text-xs"
+          value={sinceDraft}
+          max={untilDraft || undefined}
+          onChange={(e) => setSinceDraft(e.target.value)}
+        />
         <span className="text-slate-400 text-xs">to</span>
-        <input type="date" className="input w-auto !py-1.5 !text-xs" value={until} min={since || undefined} onChange={(e) => setUntil(e.target.value)} />
+        <input
+          type="date"
+          className="input w-auto !py-1.5 !text-xs"
+          value={untilDraft}
+          min={sinceDraft || undefined}
+          onChange={(e) => setUntilDraft(e.target.value)}
+        />
         <button
           type="button"
-          className="text-xs text-slate-400 hover:text-slate-600 underline"
-          onClick={() => {
-            setSince(shiftDays(todayIso(), -29));
-            setUntil(todayIso());
-          }}
+          className="btn btn-secondary btn-sm !py-1.5 !text-xs"
+          disabled={!sinceDraft || !untilDraft || !hasPendingRange}
+          onClick={applyCustomRange}
         >
-          Last 30 days
+          Apply
         </button>
       </div>
 

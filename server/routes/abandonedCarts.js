@@ -140,6 +140,60 @@ function buildRangeFilter(since, until) {
   return { orderDate: filter };
 }
 
+// ─────────────────────────────────────────────────────────────
+// Dedup for DISPLAY — separate from (and on top of) the write-time
+// dedupeKey guarantee in the postback handler. dedupeKey is keyed off
+// the FIRST identifier available at write time in priority order
+// (externalOrderId -> cartId -> abandonedCartId), so the very same
+// real-world cart can legitimately end up as two documents if it was
+// first postbacked with only a cart_id (dedupeKey "cart:X") and later
+// re-postbacked once it had converted to a real order_id (dedupeKey
+// "order:Y") — same cart, two dedupeKeys. Grouping by "identity" here
+// (cartId, falling back to externalOrderId, then abandonedCartId, then
+// a phone/email+day bucket, then the doc's own _id) catches that case
+// and collapses it to the single most recent record before it's ever
+// counted or shown, without touching the underlying documents.
+function identityKeyExpr() {
+  return {
+    $switch: {
+      branches: [
+        { case: { $and: [{ $ne: ["$cartId", null] }, { $ne: ["$cartId", ""] }] }, then: { $concat: ["cart:", "$cartId"] } },
+        {
+          case: { $and: [{ $ne: ["$externalOrderId", null] }, { $ne: ["$externalOrderId", ""] }] },
+          then: { $concat: ["order:", "$externalOrderId"] },
+        },
+        {
+          case: { $and: [{ $ne: ["$abandonedCartId", null] }, { $ne: ["$abandonedCartId", ""] }] },
+          then: { $concat: ["abandoned:", "$abandonedCartId"] },
+        },
+        {
+          case: { $and: [{ $ne: ["$phone", null] }, { $ne: ["$phone", ""] }] },
+          then: { $concat: ["phone:", "$phone", ":", { $ifNull: ["$orderDate", ""] }] },
+        },
+        {
+          case: { $and: [{ $ne: ["$email", null] }, { $ne: ["$email", ""] }] },
+          then: { $concat: ["email:", "$email", ":", { $ifNull: ["$orderDate", ""] }] },
+        },
+      ],
+      default: { $concat: ["id:", { $toString: "$_id" }] },
+    },
+  };
+}
+
+// Match -> tag each doc with its identity key -> keep only the most
+// recent document per identity key. Returns plain aggregation-pipeline
+// stages so callers can append their own $sort/$skip/$limit/$count
+// afterwards.
+function dedupeStages(matchFilter) {
+  return [
+    { $match: matchFilter },
+    { $addFields: { __identityKey: identityKeyExpr() } },
+    { $sort: { orderTimestamp: -1 } },
+    { $group: { _id: "$__identityKey", doc: { $first: "$$ROOT" } } },
+    { $replaceRoot: { newRoot: "$doc" } },
+  ];
+}
+
 // GET /api/abandoned-carts?since=&until=&search=&page=&pageSize=
 // §4 — Dashboard reads this with since/until set to whatever preset/
 // custom range is selected (no search/page — it only reads `summary`).
@@ -147,7 +201,10 @@ function buildRangeFilter(since, until) {
 // the paginated, searchable list; `summary` is always computed over the
 // FULL since/until range regardless of search or pagination, so it
 // stays an accurate range total even while the table itself is
-// filtered/paginated down to a page of matching rows.
+// filtered/paginated down to a page of matching rows. Both `summary`
+// and `records`/`total` are computed over the DEDUPED set (see
+// dedupeStages() above), so "N abandoned carts in range" and the table
+// row count always agree, and the same real cart never shows twice.
 router.get("/", async (req, res) => {
   try {
     const { since, until, search } = req.query;
@@ -162,17 +219,23 @@ router.get("/", async (req, res) => {
     // "N abandoned carts in range" figure always agree.
     const [settings, rangeDocs] = await Promise.all([
       getOrCreateAbandonedCartSettings(),
-      AbandonedCartOrder.find(rangeFilter).select("cartValue").lean(),
+      AbandonedCartOrder.aggregate([...dedupeStages(rangeFilter), { $project: { cartValue: 1 } }]),
     ]);
     const summary = computeSummary(rangeDocs, settings);
 
     const listFilter = searchFilter ? { ...rangeFilter, ...searchFilter } : rangeFilter;
-    const total = await AbandonedCartOrder.countDocuments(listFilter);
-    const docs = await AbandonedCartOrder.find(listFilter)
-      .sort({ orderTimestamp: -1 })
-      .skip((page - 1) * pageSize)
-      .limit(pageSize)
-      .lean();
+    const [facetResult] = await AbandonedCartOrder.aggregate([
+      ...dedupeStages(listFilter),
+      { $sort: { orderTimestamp: -1 } },
+      {
+        $facet: {
+          total: [{ $count: "count" }],
+          docs: [{ $skip: (page - 1) * pageSize }, { $limit: pageSize }],
+        },
+      },
+    ]);
+    const total = facetResult?.total?.[0]?.count || 0;
+    const docs = facetResult?.docs || [];
 
     res.json({
       success: true,
