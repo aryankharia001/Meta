@@ -1,7 +1,7 @@
 import express from "express";
 import Expense from "../models/Expense.js";
 import { recordActivity } from "../lib/activityLog.js";
-import { dailyEquivalentForDate } from "../lib/expenseAllocation.js";
+import { dailyEquivalentForDate, operatingExpenseForRange } from "../lib/expenseAllocation.js";
 import { todayIstIso } from "../utils/dateIst.js";
 
 const router = express.Router();
@@ -37,6 +37,53 @@ router.get("/", async (req, res) => {
   try {
     const expenses = await Expense.find({}).sort({ createdAt: -1 }).lean();
     res.json({ success: true, expenses: expenses.map(shape) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Phase 28 §2 — GET /breakdown?since=&until= — read-only, additive.
+// Returns each active, TIME-based configured Expense's allocated amount
+// for one date range, reusing the exact same operatingExpenseForRange()
+// pure function server/routes/profitability.js's own
+// operatingExpenseBreakdown() already calls — so this can never disagree
+// with Profitability's own numbers for the same expense/range. Declared
+// before "/:id" (elsewhere in this file) so "breakdown" is never
+// swallowed as an :id lookup.
+//
+// Per-order frequency expenses are excluded on purpose: they scale with
+// order count, not calendar days (see the Expense model's own comment),
+// so operatingExpenseForRange()/dailyEquivalentForDate() already treat
+// them as contributing 0 to every day — filtered out here too so the
+// response never lists a per-order-frequency row with a misleading ₹0.
+// Nothing here writes anything, and nothing here touches order sync,
+// campaign matching, or abandoned-cart logic.
+router.get("/breakdown", async (req, res) => {
+  try {
+    const { since, until } = req.query;
+    if (!since || !until) return res.status(400).json({ success: false, message: "since and until are required" });
+
+    const expenses = await Expense.find({ active: true, frequency: { $ne: "per-order" } }).lean();
+    const rows = expenses
+      .map((e) => ({
+        expenseId: String(e._id),
+        name: e.name,
+        category: e.category,
+        frequency: e.frequency,
+        startDate: e.startDate,
+        endDate: e.endDate || null,
+        notes: e.notes || "",
+        configuredAmount: e.amount,
+        amount: Math.round(operatingExpenseForRange([e], since, until) * 100) / 100,
+      }))
+      .filter((row) => row.amount > 0)
+      .sort((a, b) => b.amount - a.amount);
+
+    const total = Math.round(rows.reduce((sum, r) => sum + r.amount, 0) * 100) / 100;
+
+    res.json({ success: true, since, until, expenses: rows, total });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: err.message });

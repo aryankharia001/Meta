@@ -654,6 +654,14 @@ export async function deleteExpense(id) {
   const { data } = await api.delete(`/expenses/${id}`);
   return data; // { success }
 }
+// Phase 28 §2 — read-only range allocation of every active, time-based
+// configured Expense, for the Dashboard's Gross Profit "Other configured
+// expenses" line. Reuses the exact same operatingExpenseForRange() math
+// server/routes/profitability.js's own breakdown already uses.
+export async function fetchExpenseBreakdown({ since, until } = {}) {
+  const { data } = await api.get("/expenses/breakdown", { params: { since, until } });
+  return data; // { success, since, until, expenses, total }
+}
 
 // ─── Abandoned Carts (Phase 22, reworked in Phase 25) ──────────────
 // Routes at /api/abandoned-carts. Genuinely DB-backed (Mongo), never

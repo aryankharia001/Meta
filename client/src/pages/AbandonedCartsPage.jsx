@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   ShoppingBag,
   Loader2,
@@ -526,8 +527,18 @@ function EditAbandonedCartModal({ id, onClose, onSaved }) {
 }
 
 export default function AbandonedCartsPage() {
-  const [since, setSince] = useState(shiftDays(todayIso(), -29));
-  const [until, setUntil] = useState(todayIso());
+  // Phase 28 §6 — "Abandoned Cart Revenue → opens the abandoned-cart
+  // orders for that date range." Dashboard's Gross Profit breakdown links
+  // here as /abandoned-carts?since=&until=, so this page seeds its own
+  // since/until state from those query params when present (read once, on
+  // mount, via useState's lazy initializer — never re-synced afterwards,
+  // so the page's own date controls remain the single source of truth for
+  // this page from that point on, exactly like every other filter here).
+  // Falls back to the existing default (last 30 days) when the page is
+  // opened directly, unchanged from before.
+  const [searchParams] = useSearchParams();
+  const [since, setSince] = useState(() => searchParams.get("since") || shiftDays(todayIso(), -29));
+  const [until, setUntil] = useState(() => searchParams.get("until") || todayIso());
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
