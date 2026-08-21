@@ -58,7 +58,12 @@ function hourLabel(h) {
 
 const hourlyCache = createTtlCache(30_000);
 
-async function fetchHourlySpend({ objectId, accountIds, accessToken, date }) {
+// Phase 27 — additive export. Adding an export doesn't change this
+// function's behavior for any existing caller in this file; it lets
+// server/lib/controlHelpers.js (Phase 27's new hourly-with-controls/
+// before-after endpoints) reuse the exact same Meta hourly-spend fetch
+// instead of duplicating it, without touching anything below.
+export async function fetchHourlySpend({ objectId, accountIds, accessToken, date }) {
   const fields = "spend,impressions,clicks,actions,action_values";
   const breakdown = "hourly_stats_aggregated_by_advertiser_time_zone";
   const timeRange = encodeURIComponent(JSON.stringify({ since: date, until: date }));

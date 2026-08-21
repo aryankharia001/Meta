@@ -12,6 +12,9 @@ import { currency, number, multiplier, formatDate } from "../lib/format";
 import { roasClass, statusBadgeClass, formatBudget } from "../lib/campaignDisplay";
 import { AdThumbnail } from "./AdCells";
 import HourlyPanel from "./hourly/HourlyPanel";
+// Phase 27 — Budget & Bid Cap Control section. New, additive import;
+// nothing above/below this line is touched.
+import BudgetBidControlSection from "./control/BudgetBidControlSection";
 import { shapeOrdersForPopup } from "../lib/shapeOrder";
 import { useOverlayEscape } from "../lib/overlayStack";
 
@@ -163,6 +166,19 @@ export default function AdSetDrawer() {
                     <Kpi icon={Clock} label="Pending" value={number(orderMetrics?.pending)} />
                     <Kpi icon={RotateCcw} label="RTO" value={number(orderMetrics?.rto)} />
                   </div>
+
+                  {/* Phase 27 — Budget & Bid Cap Control, History, Sync,
+                      Hourly Activity. Purely additive section — reads/
+                      writes only the new Phase 27 /adset-control
+                      endpoints, nothing else in this drawer is touched. */}
+                  <Section title="Budget & Bid Cap Control" icon={Wallet}>
+                    <BudgetBidControlSection
+                      level="adset"
+                      tokenId={activeAdSet.tokenId}
+                      entityId={activeAdSet.adsetId}
+                      tableIdSuffix={`adset-${activeAdSet.adsetId}`}
+                    />
+                  </Section>
 
                   <Section title="Ad Set Information" icon={Target}>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 text-sm">

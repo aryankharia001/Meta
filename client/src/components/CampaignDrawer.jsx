@@ -44,6 +44,9 @@ import InfoModal from "./InfoModal";
 import OrdersListPopup from "./OrdersListPopup";
 import FavoriteButton from "./FavoriteButton";
 import EntityNotesPanel from "./EntityNotesPanel";
+// Phase 27 — Budget & Bid Cap Control section. New, additive import;
+// nothing above/below this line is touched.
+import BudgetBidControlSection from "./control/BudgetBidControlSection";
 import { recordRecentlyViewed } from "../lib/recentlyViewed";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
 import ColumnSettingsMenu from "./ColumnSettingsMenu";
@@ -723,6 +726,20 @@ export default function CampaignDrawer() {
 
             {/* ── Scrollable body ─────────────────────────────── */}
             <div className={`flex-1 overflow-y-auto px-6 py-6 space-y-8 transition-opacity ${loading ? "opacity-60 pointer-events-none" : ""}`}>
+              {/* Phase 27 — Budget & Bid Cap Control, History, Sync,
+                  Hourly Activity. Purely additive section — reads/writes
+                  only the new Phase 27 /campaign-control endpoints,
+                  nothing above or below this block is touched. */}
+              <section>
+                <SectionTitle icon={Wallet}>Budget & Bid Cap Control</SectionTitle>
+                <BudgetBidControlSection
+                  level="campaign"
+                  tokenId={activeCampaign.tokenId}
+                  entityId={details.campaign.id}
+                  tableIdSuffix="campaign"
+                />
+              </section>
+
               {/* KPIs */}
               <section>
                 <SectionTitle icon={Gauge}>Campaign KPIs</SectionTitle>

@@ -38,6 +38,12 @@ import profitabilityRouter from "./routes/profitability.js";
 // ShiprocketOrder or anything order/campaign matching reads from — see
 // routes/abandonedCarts.js's own header comment.
 import abandonedCartsRouter from "./routes/abandonedCarts.js";
+// Phase 27 — Budget & Bid Cap Control, History, Sync and Hourly
+// Activity. Entirely new, additive route files + a new sync cron;
+// nothing above is modified.
+import campaignControlRouter from "./routes/campaignControl.js";
+import adsetControlRouter from "./routes/adsetControl.js";
+import startMetaEntitySyncCron from "./services/metaEntitySyncCron.js";
 // Phase 25 — Store & Fetch Real Abandoned Cart Orders. Entirely new,
 // additive route file, mounted PUBLICLY (see below, before requireAuth)
 // since Traflead/Shiprocket Engage can't hold a login session cookie.
@@ -150,6 +156,11 @@ app.use("/api/expenses", expensesRouter);
 app.use("/api/profitability", profitabilityRouter);
 // Phase 22 — additive only, alongside every route above.
 app.use("/api/abandoned-carts", abandonedCartsRouter);
+// Phase 27 — Campaign/Ad Set Budget & Bid Cap control, history, sync,
+// hourly activity. Entirely new, additive route files; nothing above is
+// touched or imported except read-only Token/AdAccount lookups.
+app.use("/api/campaign-control", campaignControlRouter);
+app.use("/api/adset-control", adsetControlRouter);
 
 /* =========================================================
    SERVE REACT CLIENT
@@ -185,6 +196,7 @@ const start = async () => {
     });
 
     startShiprocketAutoSync();
+    startMetaEntitySyncCron();
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);

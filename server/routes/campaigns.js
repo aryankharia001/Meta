@@ -724,6 +724,12 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       "stop_time",
       "created_time",
       "updated_time",
+      // Phase 27 — additive field, read-only context for the drawer's
+      // new Budget & Bid Cap Control section (campaigns don't have a
+      // directly editable bid cap in the Graph API — see
+      // routes/campaignControl.js's header comment — but bid_strategy
+      // is still useful read-only context when Meta returns one).
+      "bid_strategy",
     ].join(",");
 
     let campaignMeta = null;

@@ -57,6 +57,13 @@ const ADSET_FIELDS = [
   "id", "name", "campaign_id", "campaign{id,name}", "status", "effective_status",
   "daily_budget", "lifetime_budget", "start_time", "end_time",
   "optimization_goal", "billing_event", "bid_strategy",
+  // Phase 27 — additive field. bid_amount is Meta's actual "Bid Cap"
+  // value (minor units, same convention as daily_budget/lifetime_budget
+  // — see deriveBudget()). Nothing existing reads this field yet, so
+  // adding it to the fetch list changes no current behavior; it lets
+  // AdSetDrawer.jsx's new Budget & Bid Cap Control section show a real
+  // current bid cap instead of just the bid_strategy name.
+  "bid_amount",
   "targeting", "created_time", "updated_time",
 ].join(",");
 

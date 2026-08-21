@@ -775,3 +775,61 @@ export async function fetchProfitExpenseOrders(tokenId, { accountIds, since, unt
   const { data } = await api.get(`/profitability/${tokenId}/expense-orders?${params}`);
   return data; // { success, since, until, type, count, cappedAt, orders }
 }
+// ─── Phase 27 — Budget & Bid Cap Control, History, Sync, Hourly ────
+// New, additive routes at /api/campaign-control and /api/adset-control.
+// Never touches fetchCampaignDetails/fetchAdSetDetails or any of their
+// endpoints above.
+
+export async function fetchCampaignCurrent(tokenId, campaignId) {
+  const { data } = await api.get(`/campaign-control/${tokenId}/${campaignId}/current`);
+  return data; // { success, current: { name, budget, budgetType, bidAmount, bidStrategy, status, effectiveStatus } }
+}
+
+export async function updateCampaignBudget(tokenId, campaignId, { budget, budgetType }) {
+  const { data } = await api.put(`/campaign-control/${tokenId}/${campaignId}/budget`, { budget, budgetType });
+  return data; // { success, current, change } or throws with the real Meta error message
+}
+
+export async function fetchAdSetCurrent(tokenId, adsetId) {
+  const { data } = await api.get(`/adset-control/${tokenId}/${adsetId}/current`);
+  return data;
+}
+
+export async function updateAdSetBudget(tokenId, adsetId, { budget, budgetType }) {
+  const { data } = await api.put(`/adset-control/${tokenId}/${adsetId}/budget`, { budget, budgetType });
+  return data;
+}
+
+export async function updateAdSetBidCap(tokenId, adsetId, { bidAmount }) {
+  const { data } = await api.put(`/adset-control/${tokenId}/${adsetId}/bid-cap`, { bidAmount });
+  return data;
+}
+
+// level: "campaign" | "adset"
+export async function fetchEntityHistory(tokenId, level, entityId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const base = level === "adset" ? "adset-control" : "campaign-control";
+  const { data } = await api.get(`/${base}/${tokenId}/${entityId}/history`, { params });
+  return data; // { success, events }
+}
+
+export async function fetchEntityHourlyControl(tokenId, level, entityId, date) {
+  const base = level === "adset" ? "adset-control" : "campaign-control";
+  const { data } = await api.get(`/${base}/${tokenId}/${entityId}/hourly`, { params: { date } });
+  return data; // { success, date, hours, summary, metaHourlyAvailable, profitMethod }
+}
+
+export async function fetchChangeCompare(tokenId, level, entityId, { changeId, type }) {
+  const base = level === "adset" ? "adset-control" : "campaign-control";
+  const { data } = await api.get(`/${base}/${tokenId}/${entityId}/compare`, { params: { changeId, type } });
+  return data; // { success, change, before, after }
+}
+
+// "Refresh / Sync" button (spec §11) — same endpoint as fetchCampaignCurrent/
+// fetchAdSetCurrent (both always do a live reconcile against Meta first),
+// exposed under its own name so call sites read as an explicit user action.
+export async function syncEntityNow(tokenId, level, entityId) {
+  return level === "adset" ? fetchAdSetCurrent(tokenId, entityId) : fetchCampaignCurrent(tokenId, entityId);
+}
