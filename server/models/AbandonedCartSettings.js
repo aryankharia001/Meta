@@ -26,14 +26,13 @@ const abandonedCartSettingsSchema = new mongoose.Schema(
     // real, delivered order". Not read anywhere in revenue math.
     deliveryRate: { type: Number, default: 70, min: 0, max: 100 },
 
-    // DEPRECATED as of Phase 34, kept only so no historical data is
-    // lost. Phase 33's status-based recognition (Traflead lead `status`
-    // in this list, optionally requiring shipment.status==="delivered")
-    // has been replaced entirely: revenue recognition is now purely
-    // "shipment.status === 'delivered'" (see trafleadSyncService.js's
-    // isDeliveredLead()) attributed to the delivered date, with no
-    // settings-configurable lead-status list and no manual percentage —
-    // "Actual delivered shipments determine the revenue," per spec.
+    // DEPRECATED as of Phase 34 (Phase 33's status-based recognition,
+    // optionally requiring shipment.status==="delivered", was replaced by
+    // pure shipment-delivery recognition), then Phase 35/36 kept revenue
+    // shipment-based throughout. Kept only so no historical data is lost
+    // — NOT read by Phase 37's cnfRevenueRate below, which is its own
+    // field with its own (simpler, single-status, percent-driven) logic
+    // rather than a revival of this exact list+boolean shape.
     recognizedLeadStatuses: {
       type: [String],
       default: ["confirmed"],
@@ -49,6 +48,24 @@ const abandonedCartSettingsSchema = new mongoose.Schema(
     packagingCost: { type: Number, default: 0, min: 0 },
     shippingCost: { type: Number, default: 0, min: 0 },
     miscCost: { type: Number, default: 0, min: 0 },
+
+    // Phase 37 — Abandoned Cart CNF-Based Revenue. A lead's Traflead
+    // `status` reaching "confirmed" ("CNF" in the spec's own shorthand —
+    // there is no literal "CNF" value anywhere in Traflead's data; the
+    // LEAD_STATUSES enum is processing/approved/cancelled/hold/trash/
+    // confirmed, see TrafleadAbandonedCartLead.js's header comment) is
+    // the revenue signal now, NOT shipment-delivery status. This percent
+    // is a manual, explicit ASSUMPTION of how many of those confirmed
+    // leads should be counted as revenue-eligible — e.g. 40 confirmed
+    // leads × 50% = 20 orders' worth of revenue counted. Global,
+    // backend-persisted setting (same reasoning as the four cost fields
+    // above): the same assumption must apply everywhere this is read
+    // (Dashboard, Daily, Analytics, Profitability, Campaign Explorer, and
+    // this page's own summary), never a per-browser value. Changing it
+    // recalculates instantly on next fetch — nothing here is cached
+    // beyond the settings document itself. See trafleadSyncService.js's
+    // computeAbandonedCartSummary() for the full calculation.
+    cnfRevenueRate: { type: Number, default: 50, min: 0, max: 100 },
   },
   { timestamps: true }
 );

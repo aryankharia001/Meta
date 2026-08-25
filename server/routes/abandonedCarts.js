@@ -262,6 +262,8 @@ router.get("/settings", async (req, res) => {
       packagingCost: settings.packagingCost,
       shippingCost: settings.shippingCost,
       miscCost: settings.miscCost,
+      // Phase 37
+      cnfRevenueRate: settings.cnfRevenueRate,
     });
   } catch (err) {
     console.error(err);
@@ -271,7 +273,7 @@ router.get("/settings", async (req, res) => {
 
 router.put("/settings", async (req, res) => {
   try {
-    const { manufacturingCost, packagingCost, shippingCost, miscCost } = req.body || {};
+    const { manufacturingCost, packagingCost, shippingCost, miscCost, cnfRevenueRate } = req.body || {};
 
     for (const [label, val] of [
       ["manufacturingCost", manufacturingCost],
@@ -283,18 +285,23 @@ router.put("/settings", async (req, res) => {
         return res.status(400).json({ success: false, message: `${label} must be a non-negative number` });
       }
     }
+    // Phase 37 — CNF Revenue Rate is a percentage, 0-100.
+    if (cnfRevenueRate !== undefined && (isNaN(Number(cnfRevenueRate)) || Number(cnfRevenueRate) < 0 || Number(cnfRevenueRate) > 100)) {
+      return res.status(400).json({ success: false, message: "cnfRevenueRate must be a number between 0 and 100" });
+    }
 
     const settings = await getOrCreateAbandonedCartSettings();
     if (manufacturingCost !== undefined) settings.manufacturingCost = Number(manufacturingCost) || 0;
     if (packagingCost !== undefined) settings.packagingCost = Number(packagingCost) || 0;
     if (shippingCost !== undefined) settings.shippingCost = Number(shippingCost) || 0;
     if (miscCost !== undefined) settings.miscCost = Number(miscCost) || 0;
+    if (cnfRevenueRate !== undefined) settings.cnfRevenueRate = Number(cnfRevenueRate);
     await settings.save();
 
     await recordActivity({
       user: req.user?.email,
       type: "abandoned_cart_settings_updated",
-      message: "Abandoned cart per-delivered-unit expense settings updated",
+      message: "Abandoned cart expense/CNF revenue rate settings updated",
       entityType: "abandonedCartSettings",
       entityId: String(settings._id),
     });
@@ -305,6 +312,7 @@ router.put("/settings", async (req, res) => {
       packagingCost: settings.packagingCost,
       shippingCost: settings.shippingCost,
       miscCost: settings.miscCost,
+      cnfRevenueRate: settings.cnfRevenueRate,
     });
   } catch (err) {
     console.error(err);

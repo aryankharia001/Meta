@@ -112,7 +112,7 @@ const PRESETS = [
   { key: "30d", label: "30 Days", range: () => [shiftDays(todayIso(), -29), todayIso()] },
 ];
 
-function SettingsPanel({ open, onClose }) {
+function SettingsPanel({ open, onClose, onSaved }) {
   const [form, setForm] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -131,6 +131,7 @@ function SettingsPanel({ open, onClose }) {
           packagingCost: String(res.packagingCost ?? 0),
           shippingCost: String(res.shippingCost ?? 0),
           miscCost: String(res.miscCost ?? 0),
+          cnfRevenueRate: String(res.cnfRevenueRate ?? 50),
         });
       })
       .catch((err) => !cancelled && setError(err.message || "Failed to load settings"))
@@ -152,14 +153,25 @@ function SettingsPanel({ open, onClose }) {
         packagingCost: Number(form.packagingCost) || 0,
         shippingCost: Number(form.shippingCost) || 0,
         miscCost: Number(form.miscCost) || 0,
+        cnfRevenueRate: Number(form.cnfRevenueRate) || 0,
       });
       setForm({
         manufacturingCost: String(res.manufacturingCost ?? 0),
         packagingCost: String(res.packagingCost ?? 0),
         shippingCost: String(res.shippingCost ?? 0),
         miscCost: String(res.miscCost ?? 0),
+        cnfRevenueRate: String(res.cnfRevenueRate ?? 50),
       });
       setSavedAt(Date.now());
+      // Phase 37 — "changing it must immediately recalculate the
+      // Abandoned Cart revenue and profitability." Re-fetch the page's own
+      // summary right away rather than waiting for the next unrelated
+      // refresh/navigation; every other page reading this same setting
+      // already recalculates on its own next fetch (settings are read
+      // fresh server-side on every GET /api/abandoned-carts call, never
+      // cached), so this just makes it immediate here too instead of only
+      // eventually.
+      onSaved?.();
     } catch (err) {
       setError(err.message || "Failed to save settings");
     } finally {
@@ -177,9 +189,10 @@ function SettingsPanel({ open, onClose }) {
       </div>
       <p className="text-xs text-slate-400 -mt-1">
         Applies everywhere in the app (this page, Dashboard, Daily, Analytics, Profitability, Campaign Explorer). Revenue is
-        recognized purely from Traflead's real shipment status — a lead counts once its shipment status is exactly
-        "delivered," attributed to the date it was delivered, never an assumed percentage or a settings-configurable status
-        list. These per-unit costs are charged against every shipment that actually delivered in the selected range.
+        recognized from CNF (Confirmed) leads — orders whose Traflead status is "confirmed" — × the CNF Revenue Rate below, a
+        manual assumption of how many of those confirmed leads to count as revenue. Shipment delivery status is still
+        verified and shown (see the table below) but no longer drives revenue on its own. These per-order costs are charged
+        against the resulting Revenue-Counted CNF order count, not the raw confirmed-lead count.
       </p>
       {loading || !form ? (
         <div className="h-20 animate-pulse bg-slate-100 rounded-lg" />
@@ -187,7 +200,22 @@ function SettingsPanel({ open, onClose }) {
         <form onSubmit={handleSave} className="flex flex-col gap-3">
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
-              Manufacturing Cost / Delivered
+              CNF Revenue Rate
+              <div className="relative">
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  className="input !pr-6"
+                  value={form.cnfRevenueRate}
+                  onChange={(e) => setForm((f) => ({ ...f, cnfRevenueRate: e.target.value }))}
+                />
+                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400">%</span>
+              </div>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
+              Manufacturing Cost / Order
               <input
                 type="number"
                 min="0"
@@ -198,7 +226,7 @@ function SettingsPanel({ open, onClose }) {
               />
             </label>
             <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-              Packaging Cost / Delivered
+              Packaging Cost / Order
               <input
                 type="number"
                 min="0"
@@ -209,7 +237,7 @@ function SettingsPanel({ open, onClose }) {
               />
             </label>
             <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-              Shipping Cost / Delivered
+              Shipping Cost / Order
               <input
                 type="number"
                 min="0"
@@ -220,7 +248,7 @@ function SettingsPanel({ open, onClose }) {
               />
             </label>
             <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-              Misc Cost / Delivered
+              Misc Cost / Order
               <input
                 type="number"
                 min="0"
@@ -235,6 +263,10 @@ function SettingsPanel({ open, onClose }) {
             </button>
             {savedAt && !saving && <span className="text-xs text-emerald-600">Saved</span>}
           </div>
+          <p className="text-[11px] text-slate-400">
+            "/ Order" here means per Revenue-Counted CNF order (CNF Leads × CNF Revenue Rate) — see the summary above for that
+            count. Saving recalculates Abandoned Cart revenue and profit immediately, everywhere it's shown.
+          </p>
         </form>
       )}
       {error && (
@@ -703,11 +735,11 @@ export default function AbandonedCartsPage() {
             <p className="text-xs text-slate-400">
               {loading || !summary
                 ? "Loading…"
-                : `${formatNumber(summary.orders)} abandoned cart lead${summary.orders === 1 ? "" : "s"} in range (synced from Traflead) · Matched ${formatNumber(
-                    summary.matched
+                : `${formatNumber(summary.orders)} abandoned cart lead${summary.orders === 1 ? "" : "s"} in range (synced from Traflead) · CNF ${formatNumber(
+                    summary.cnfLeadsCount
                   )} · Potential ${formatCurrency(summary.potentialRevenue)} · Confirmed Revenue ${formatCurrency(
-                    summary.confirmedRevenue ?? summary.deliveredRevenue
-                  )} (${formatNumber(summary.deliveredCount)} delivered) · Profit ${formatCurrency(summary.profit)}${
+                    summary.confirmedRevenue ?? summary.cnfRevenue
+                  )} (${formatNumber(summary.cnfRevenueCountedCount)} CNF × ${formatNumber(summary.cnfRevenueRate)}%) · Profit ${formatCurrency(summary.profit)}${
                     summary.pendingVerification > 0 ? ` · ${formatNumber(summary.pendingVerification)} awaiting verification` : ""
                   }`}
             </p>
@@ -728,7 +760,7 @@ export default function AbandonedCartsPage() {
 
       <SyncStatusBar since={since} until={until} onSyncComplete={() => load(true)} />
 
-      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => load(true)} />
 
       {(actionError || error) && (
         <div className="flex items-center gap-1.5 text-xs text-rose-600">

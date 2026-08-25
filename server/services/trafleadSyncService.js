@@ -951,6 +951,18 @@ export function isDeliveredMatch(lead) {
   return String(lead?.matchedShipmentStatus || "").toLowerCase() === "delivered";
 }
 
+// Phase 37 — "CNF" is the spec's own shorthand for "Confirmed Lead."
+// There is no literal "CNF" value anywhere in Traflead's data — its
+// LEAD_STATUSES enum is processing/approved/cancelled/hold/trash/
+// confirmed (see TrafleadAbandonedCartLead.js's header comment) — so a
+// CNF lead is exactly a lead whose Traflead `status` is "confirmed".
+// Case-insensitive/trimmed purely defensively; Traflead's own value is
+// already lowercase "confirmed" (see AbandonedCartsPage.jsx's
+// STATUS_STYLES/StatusBadge, which render it exactly as stored).
+export function isCnfLead(lead) {
+  return String(lead?.status || "").trim().toLowerCase() === "confirmed";
+}
+
 /**
  * Phase 35 — the entire Abandoned Cart summary for a date range, built
  * from ONE dataset: the order-date cohort (cohortLeads — leads whose
@@ -966,20 +978,63 @@ export function isDeliveredMatch(lead) {
  * `unmatched` — orders - matched (no shipment found for that phone at
  *   all — shown in the drill-down as "Shipment: Not Found").
  * `deliveredCount` — of the MATCHED orders, how many currently read
- *   "delivered" — this is the ONLY thing that generates revenue.
+ *   "delivered". As of Phase 37 this is INFORMATIONAL ONLY (shipment
+ *   verification, still fully computed and shown) — it no longer drives
+ *   revenue/expenses/profit; see cnfRevenue below for what does.
  * `notDeliveredMatched` — matched - deliveredCount (matched to a real
  *   shipment, but that shipment isn't Delivered yet/anymore).
  * `deliveredRevenue` — sum of `total` for exactly the deliveredCount
- *   orders — attributed to the SELECTED range because these ARE the
- *   selected-range orders, never moved to a delivery date.
+ *   orders. Also informational only as of Phase 37.
  *
- * Expenses/profit use the same per-delivered-unit formula Phase 25/33/34
- * already used, just driven by this new deliveredCount.
+ * Phase 37 — Abandoned Cart CNF-Based Revenue. Revenue recognition moves
+ * OFF shipment-delivery status entirely and onto the lead's own Traflead
+ * `status` reaching "confirmed" (CNF), combined with a manual, explicit,
+ * settings-configurable percentage — because CNF is available immediately
+ * on every lead (no phone-matched-shipment lookup required, no waiting on
+ * a courier), at the cost of being an assumption rather than a verified
+ * delivery. The spec is explicit that this is a deliberate trade-off:
+ * "the CNF percentage is an assumption for revenue calculation only —
+ * never change the actual Total Orders or CNF Lead count because of the
+ * percentage."
+ *
+ *   cnfLeads             — cohortLeads filtered to isCnfLead().
+ *   cnfLeadsCount         — cnfLeads.length. A raw, real count — NEVER
+ *                           scaled by cnfRevenueRate.
+ *   cnfRevenueRate        — the configured percent (settings.cnfRevenueRate,
+ *                           0–100, default 50).
+ *   cnfPotentialRevenue   — sum of `total` across EVERY CNF lead (i.e. what
+ *                           revenue would be if the rate were 100%) —
+ *                           shown for context, never itself booked as
+ *                           revenue.
+ *   avgCnfOrderValue      — cnfPotentialRevenue ÷ cnfLeadsCount, the
+ *                           existing "average order value" structure the
+ *                           spec asks to reuse.
+ *   cnfRevenueCountedCount — round(cnfLeadsCount × cnfRevenueRate/100) —
+ *                           the "Revenue-Counted CNF" order count (e.g.
+ *                           40 × 50% = 20 orders). Rounded to a whole
+ *                           number of orders since expenses below are
+ *                           charged per whole order.
+ *   cnfRevenue            — avgCnfOrderValue × cnfRevenueCountedCount —
+ *                           the actual Abandoned Cart revenue booked for
+ *                           this range, and what "Confirmed Revenue" now
+ *                           means everywhere it's read.
+ *
+ * Expenses/profit use the same per-order formula Phase 25/33/34/35
+ * already used (cost × count), just driven by cnfRevenueCountedCount
+ * instead of deliveredCount now — the same orders whose revenue is being
+ * counted are the orders whose per-order costs are charged.
  *
  * Back-compat aliases (expectedDelivered/recognizedRevenue/
- * netContribution/deliveryRate) are kept so Dashboard.jsx's existing
- * Pure Profit calculation — verified line-by-line in Phase 34 to depend
- * only on these alias names — needs no changes at all.
+ * netContribution/deliveryRate/confirmedRevenue) are kept so Dashboard.jsx
+ * (and every other consumer — Daily/Analytics/Profitability/Campaign
+ * Explorer, all of which only ever read this summary object, never
+ * recompute it) automatically picks up the CNF-based numbers with no
+ * changes to how they READ the summary — only what these names now MEAN
+ * changes (recognizedRevenue/netContribution/confirmedRevenue are now
+ * CNF-based, not shipment-delivery-based). expectedDelivered/deliveryRate
+ * are left pointed at the old shipment-based deliveredCount — they were
+ * never rendered anywhere (dead back-compat plumbing from Phase 33/34)
+ * and aren't part of this phase's revenue path.
  */
 export function computeAbandonedCartSummary(cohortLeads, settings) {
   const orders = cohortLeads.length;
@@ -1000,18 +1055,30 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
   const notDeliveredMatched = matched - deliveredCount;
   const deliveredRevenue = deliveredLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
 
+  // Phase 37 — CNF-based revenue (see header comment above).
+  const cnfLeads = cohortLeads.filter(isCnfLead);
+  const cnfLeadsCount = cnfLeads.length;
+  const cnfRevenueRate = Math.min(100, Math.max(0, Number(settings.cnfRevenueRate ?? 50) || 0));
+  const cnfPotentialRevenue = cnfLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
+  const avgCnfOrderValue = cnfLeadsCount ? cnfPotentialRevenue / cnfLeadsCount : 0;
+  const cnfRevenueCountedCount = Math.round(cnfLeadsCount * (cnfRevenueRate / 100));
+  const cnfRevenue = avgCnfOrderValue * cnfRevenueCountedCount;
+
   const manufacturingCost = Number(settings.manufacturingCost) || 0;
   const packagingCost = Number(settings.packagingCost) || 0;
   const shippingCost = Number(settings.shippingCost) || 0;
   const miscCost = Number(settings.miscCost) || 0;
 
-  const manufacturingExpense = deliveredCount * manufacturingCost;
-  const packagingExpense = deliveredCount * packagingCost;
-  const shippingExpense = deliveredCount * shippingCost;
-  const miscExpense = deliveredCount * miscCost;
+  // Phase 37 — expenses now charged per CNF revenue-counted order (was
+  // per shipment-delivered order) — the same orders whose revenue is
+  // being counted are the orders whose per-order costs are charged.
+  const manufacturingExpense = cnfRevenueCountedCount * manufacturingCost;
+  const packagingExpense = cnfRevenueCountedCount * packagingCost;
+  const shippingExpense = cnfRevenueCountedCount * shippingCost;
+  const miscExpense = cnfRevenueCountedCount * miscCost;
   const totalExpenses = manufacturingExpense + packagingExpense + shippingExpense + miscExpense;
 
-  const profit = deliveredRevenue - totalExpenses;
+  const profit = cnfRevenue - totalExpenses;
 
   const byMatchedStatus = {};
   for (const l of cohortLeads) {
@@ -1025,9 +1092,18 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
     matched,
     unmatched,
     pendingVerification,
+    // Shipment-verification figures (Phase 34/35/36 §1) — informational
+    // only as of Phase 37, no longer part of the revenue/profit formula.
     deliveredCount,
     notDeliveredMatched,
     deliveredRevenue,
+    // Phase 37 — CNF-based revenue, now the actual revenue/profit driver.
+    cnfLeadsCount,
+    cnfRevenueRate,
+    cnfPotentialRevenue,
+    avgCnfOrderValue,
+    cnfRevenueCountedCount,
+    cnfRevenue,
     manufacturingExpense,
     packagingExpense,
     shippingExpense,
@@ -1035,22 +1111,27 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
     totalExpenses,
     profit,
     byMatchedStatus,
-    // Back-compat aliases (Phase 33/34 field names) — same values, new source.
+    // Back-compat aliases (Phase 33/34 field names) — same names, now
+    // sourced from the CNF-based figures (recognizedRevenue/
+    // netContribution/confirmedRevenue) so every existing consumer that
+    // only reads these names picks up Phase 37's revenue model with zero
+    // changes on its end. expectedDelivered/deliveryRate stay pointed at
+    // the shipment-based deliveredCount — dead, never-rendered plumbing
+    // from Phase 33/34, unrelated to this phase's revenue path.
     expectedDelivered: deliveredCount,
-    recognizedRevenue: deliveredRevenue,
+    recognizedRevenue: cnfRevenue,
     netContribution: profit,
     deliveryRate: orders ? (deliveredCount / orders) * 100 : 0,
-    // Phase 36 §2 — same values under the spec's own terminology ("Total
-    // Abandoned Cart Orders / Delivered Orders / Non-Delivered Orders /
-    // Confirmed Revenue"), so both this and every existing Phase 33/34/35
-    // consumer read the exact same numbers under whichever name they use.
-    // "Non-Delivered" here is every order that ISN'T counted as Delivered
-    // revenue — matched-but-not-delivered, not-yet-matched, AND
-    // not-yet-verified all together — i.e. orders - deliveredCount.
+    // Phase 36 §2 — order-count terminology, unchanged by Phase 37 (still
+    // literally every order / every shipment-delivered order — Phase 37
+    // doesn't touch order counts, only how REVENUE is recognized).
     totalOrders: orders,
     deliveredOrders: deliveredCount,
     nonDeliveredOrders: orders - deliveredCount,
-    confirmedRevenue: deliveredRevenue,
+    // Phase 36 §2/§3 named this "Confirmed Revenue"; Phase 37 makes it
+    // literally that — revenue confirmed via CNF status, not shipment
+    // delivery.
+    confirmedRevenue: cnfRevenue,
   };
 }
 

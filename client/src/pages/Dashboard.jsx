@@ -599,26 +599,44 @@ export default function Dashboard() {
       unmatched: 0,
       deliveredCount: 0,
       notDeliveredMatched: 0,
+      deliveredRevenue: 0,
+      cnfLeadsCount: 0,
+      cnfRevenueRate: 0,
+      cnfRevenueCountedCount: 0,
+      cnfPotentialRevenue: 0,
+      cnfRevenue: 0,
     };
     const abandonedCartOrderCount = ac.orders || 0;
     const abandonedCartExpectedDelivered = ac.expectedDelivered || 0;
     const abandonedCartPotentialRevenue = ac.potentialRevenue || 0;
+    // Phase 37 — recognizedRevenue/netContribution/totalExpenses are now
+    // CNF-based (see trafleadSyncService.js's computeAbandonedCartSummary
+    // header comment) — read exactly as before, only what the server puts
+    // in them changed, so nothing else about this Gross Profit calculation
+    // needs to change.
     const abandonedCartRecognizedRevenue = ac.recognizedRevenue || 0;
     const abandonedCartExpenses = ac.totalExpenses || 0;
     const abandonedCartContribution = ac.netContribution || 0;
-    // Phase 35 — of the leads ORDERED in this range, how many were
-    // phone-matched to a real shipment at all, and of those, how many
-    // currently read Delivered. Purely informational alongside the
-    // headline numbers; the revenue math above (ac.deliveredCount/
-    // ac.deliveredRevenue, aliased as expectedDelivered/
-    // recognizedRevenue for backward compatibility) already reflects
-    // exactly this same delivered subset.
+    // Phase 37 — CNF-based revenue figures, the actual profit driver as of
+    // this phase. Never scaled/re-derived client-side — read exactly as
+    // the server computed them so this page can never disagree with the
+    // Abandoned Carts management page or AbandonedCartSummaryCard.
+    const abandonedCartCnfLeadsCount = ac.cnfLeadsCount || 0;
+    const abandonedCartCnfRevenueRate = ac.cnfRevenueRate || 0;
+    const abandonedCartCnfRevenueCountedCount = ac.cnfRevenueCountedCount || 0;
+    const abandonedCartCnfPotentialRevenue = ac.cnfPotentialRevenue || 0;
+    // Phase 34/35/36 §1 — shipment verification. INFORMATIONAL ONLY as of
+    // Phase 37 — kept exactly as computed before, just no longer feeding
+    // revenue/expenses/profit above (ac.recognizedRevenue/netContribution
+    // are CNF-based now, not derived from these).
     const abandonedCartMatched = ac.matched || 0;
     const abandonedCartUnmatched = ac.unmatched || 0;
     const abandonedCartDeliveredCount = ac.deliveredCount || 0;
     const abandonedCartNotDeliveredMatched = ac.notDeliveredMatched || 0;
+    const abandonedCartShipmentDeliveredRevenue = ac.deliveredRevenue || 0;
     // Delivered rate — what fraction of leads PLACED in this range are,
-    // as of now, phone-matched AND delivered. Display-only.
+    // as of now, phone-matched AND delivered. Display-only, shipment-based
+    // (unrelated to the CNF revenue rate setting above).
     const abandonedCartDeliveryRate = abandonedCartOrderCount ? (abandonedCartDeliveredCount / abandonedCartOrderCount) * 100 : 0;
 
     // Total Gross Revenue = Actual Order Revenue + Additional Prepaid
@@ -751,12 +769,23 @@ export default function Dashboard() {
           potentialRevenue: abandonedCartPotentialRevenue,
           recognizedRevenue: abandonedCartRecognizedRevenue,
           expenses: abandonedCartExpenses,
-          // Phase 35
+          // Phase 35 — shipment verification, informational only as of
+          // Phase 37 (no longer the revenue/expense/profit driver below).
           matched: abandonedCartMatched,
           unmatched: abandonedCartUnmatched,
           deliveredCount: abandonedCartDeliveredCount,
           notDeliveredMatched: abandonedCartNotDeliveredMatched,
-          deliveredRevenue: abandonedCartRecognizedRevenue,
+          shipmentDeliveredRevenue: abandonedCartShipmentDeliveredRevenue,
+          // Phase 37 — CNF-based revenue (see cardValues above / spec).
+          // `recognizedRevenue`/`profit` above ARE these numbers now —
+          // these extra fields expose the chain (leads → rate → counted →
+          // revenue) so the UI can show it explicitly rather than folding
+          // it into one opaque total.
+          cnfLeadsCount: abandonedCartCnfLeadsCount,
+          cnfRevenueRate: abandonedCartCnfRevenueRate,
+          cnfRevenueCountedCount: abandonedCartCnfRevenueCountedCount,
+          cnfPotentialRevenue: abandonedCartCnfPotentialRevenue,
+          cnfRevenue: abandonedCartRecognizedRevenue,
           profit: abandonedCartContribution,
         },
         totalRecognizedRevenue,
@@ -792,11 +821,18 @@ export default function Dashboard() {
         abandonedCartRecognizedRevenue,
         abandonedCartExpenses,
         abandonedCartContribution,
-        // Phase 35
+        // Phase 35 — shipment verification, informational only as of
+        // Phase 37.
         abandonedCartMatched,
         abandonedCartUnmatched,
         abandonedCartDeliveredCount,
         abandonedCartNotDeliveredMatched,
+        abandonedCartShipmentDeliveredRevenue,
+        // Phase 37 — CNF-based revenue chain (see cardValues above).
+        abandonedCartCnfLeadsCount,
+        abandonedCartCnfRevenueRate,
+        abandonedCartCnfRevenueCountedCount,
+        abandonedCartCnfPotentialRevenue,
         totalGrossRevenue,
       },
       spendBreakdown: {
@@ -1739,9 +1775,8 @@ function RevenueCard({
           <BreakdownRow label="Total Prepaid Revenue" value={breakdown.totalPrepaidRevenue} strong />
           <BreakdownRow label="COD Revenue" value={breakdown.codRevenueActual} />
           <BreakdownRow
-            label="Delivered Abandoned Cart Revenue"
+            label="Confirmed Abandoned Cart Revenue (CNF-based)"
             value={breakdown.abandonedCartRecognizedRevenue}
-            onClick={() => setDrilldownOpen(true)}
           />
           <BreakdownRow label="Total Gross Revenue" value={breakdown.totalGrossRevenue} strong />
 
@@ -1758,20 +1793,38 @@ function RevenueCard({
             </div>
           ) : (
             <>
+              {/* Phase 37 — CNF-based revenue, the actual revenue/profit
+                  driver now. "Do not hide this calculation inside the
+                  Gross Profit number" — every step is its own row. */}
               <BreakdownRow label="Abandoned Cart Leads (synced from Traflead)" value={breakdown.abandonedCartOrders} format={number} />
+              <BreakdownRow label="CNF / Confirmed Leads" value={breakdown.abandonedCartCnfLeadsCount} format={number} />
+              <BreakdownRow label="CNF Revenue Rate" value={breakdown.abandonedCartCnfRevenueRate} format={(v) => `${number(v)}%`} />
+              <BreakdownRow label="Revenue Counted (CNF × Rate)" value={breakdown.abandonedCartCnfRevenueCountedCount} format={number} />
+              <BreakdownRow label="Gross Potential Revenue" value={breakdown.abandonedCartPotentialRevenue} />
+              <BreakdownRow label="Confirmed Revenue" value={breakdown.abandonedCartRecognizedRevenue} strong />
+              <BreakdownRow label="Abandoned Cart Expenses" value={breakdown.abandonedCartExpenses} />
+              <BreakdownRow label="Abandoned Cart Profit" value={breakdown.abandonedCartContribution} strong />
+              <div className="text-[10px] text-slate-400 italic">
+                Revenue calculated from CNF leads × selected CNF revenue rate.
+              </div>
+
+              {/* Phase 34/35/36 §1 — shipment verification. Informational
+                  only as of Phase 37, kept exactly as before, no longer
+                  the revenue driver above. */}
+              <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-slate-100">
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+                  Shipment verification (informational)
+                </div>
+              </div>
               <BreakdownRow label="Shipment Matched (by phone)" value={breakdown.abandonedCartMatched} format={number} />
               <BreakdownRow label="Delivered" value={breakdown.abandonedCartDeliveredCount} format={number} />
               <BreakdownRow label="Not Delivered (matched, not yet)" value={breakdown.abandonedCartNotDeliveredMatched} format={number} />
               <BreakdownRow label="No Shipment Matched" value={breakdown.abandonedCartUnmatched} format={number} />
-              <BreakdownRow label="Gross Potential Revenue" value={breakdown.abandonedCartPotentialRevenue} />
               <BreakdownRow
-                label="Delivered Revenue (of shipments delivered this period)"
-                value={breakdown.abandonedCartRecognizedRevenue}
-                strong
+                label="Delivered Revenue (shipment-based, info only)"
+                value={breakdown.abandonedCartShipmentDeliveredRevenue}
                 onClick={() => setDrilldownOpen(true)}
               />
-              <BreakdownRow label="Abandoned Cart Expenses" value={breakdown.abandonedCartExpenses} />
-              <BreakdownRow label="Abandoned Cart Profit" value={breakdown.abandonedCartContribution} strong />
             </>
           )}
 
@@ -2029,22 +2082,42 @@ function GrossProfitSection({
                   {number(abandonedCart.orders)} <ExternalLink size={10} className="text-slate-300" />
                 </span>
               </Link>
-              <StatRow label="Shipment Matched (by phone)" value={abandonedCart.matched} format={number} />
-              <StatRow label="Delivered" value={abandonedCart.deliveredCount} format={number} />
-              <StatRow label="Not Delivered (matched, not yet)" value={abandonedCart.notDeliveredMatched} format={number} muted />
-              <StatRow label="No Shipment Matched" value={abandonedCart.unmatched} format={number} muted />
+              {/* Phase 37 — CNF-based revenue, the actual revenue/profit
+                  driver. Shown as its own explicit chain per spec §5
+                  ("do not hide this calculation inside the Gross Profit
+                  number"). */}
+              <StatRow label="CNF / Confirmed Leads" value={abandonedCart.cnfLeadsCount} format={number} />
+              <StatRow label="CNF Revenue Rate" value={abandonedCart.cnfRevenueRate} format={(v) => `${number(v)}%`} />
+              <StatRow label="Revenue Counted (CNF × Rate)" value={abandonedCart.cnfRevenueCountedCount} format={number} />
               <Link to={`/abandoned-carts?since=${since}&until=${until}`} className="flex items-center justify-between gap-2 py-1 -mx-1.5 px-1.5 rounded-md hover:bg-slate-50 transition-colors">
                 <span className="text-[12px] text-slate-500">Potential Revenue</span>
                 <span className="text-[13px] font-medium text-slate-700">{currency(abandonedCart.potentialRevenue)}</span>
               </Link>
-              <StatRow
-                label="Delivered Revenue"
-                value={abandonedCart.deliveredRevenue}
-                onClick={() => setAbandonedCartDrilldownOpen(true)}
-                strong
-              />
+              <StatRow label="Confirmed Revenue" value={abandonedCart.cnfRevenue} strong />
               <StatRow label="Abandoned Cart Expenses" value={abandonedCart.expenses} muted />
               <StatRow label="Abandoned Cart Profit" value={abandonedCart.profit} strong />
+              <div className="text-[10px] text-slate-400 italic pt-1">
+                Revenue calculated from CNF leads × selected CNF revenue rate.
+              </div>
+
+              {/* Phase 34/35/36 §1 — shipment verification. Informational
+                  only as of Phase 37 — kept, no longer the revenue driver
+                  above. */}
+              <div className="pt-2 mt-1 border-t border-slate-100">
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide pb-1">
+                  Shipment verification (informational)
+                </div>
+              </div>
+              <StatRow label="Shipment Matched (by phone)" value={abandonedCart.matched} format={number} muted />
+              <StatRow label="Delivered" value={abandonedCart.deliveredCount} format={number} muted />
+              <StatRow label="Not Delivered (matched, not yet)" value={abandonedCart.notDeliveredMatched} format={number} muted />
+              <StatRow label="No Shipment Matched" value={abandonedCart.unmatched} format={number} muted />
+              <StatRow
+                label="Delivered Revenue (shipment-based, info only)"
+                value={abandonedCart.shipmentDeliveredRevenue}
+                onClick={() => setAbandonedCartDrilldownOpen(true)}
+                muted
+              />
             </div>
           )}
 
