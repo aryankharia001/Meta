@@ -2,7 +2,7 @@ import { Inbox } from "lucide-react";
 import { currency, number, multiplier } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
 import { formatBudget, roasClass } from "../../lib/campaignDisplay";
-import { LiveIndicator } from "../CampaignCells";
+import { LiveIndicator, BudgetCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 (campaign selection) — "Campaign Comparison Mode". Only
@@ -84,7 +84,13 @@ export default function DailyCompareView({ days, onOpenRow }) {
                         className={`row-clickable num ${m.key === "roas" ? roasClass(c.roas) : ""}`}
                         onClick={() => onOpenRow(c)}
                       >
-                        {m.key === "roas" ? multiplier(c.roas) : m.format(c[m.key], c)}
+                        {m.key === "roas" ? (
+                          multiplier(c.roas)
+                        ) : m.key === "budget" ? (
+                          <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
+                        ) : (
+                          m.format(c[m.key], c)
+                        )}
                       </td>
                     ))}
                   </tr>

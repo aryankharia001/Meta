@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, ChevronLeft, Columns3, GripVertical, Pin, Pi
 import { ALL_COLUMNS, DEFAULT_HIDDEN } from "../../lib/campaignExplorerColumns";
 import ExpandedRowContent from "./ExpandedRowContent";
 import { useColumnPrefs } from "../../lib/useColumnPrefs";
-import { LiveIndicator, RoasValue, StatusPill } from "../CampaignCells";
+import { LiveIndicator, RoasValue, StatusPill, BudgetCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — Campaign Explorer's dense data table. Purpose-built rather
@@ -347,6 +347,18 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
                           return (
                             <td key={col.key} className={`center ${pinClass}`} style={style}>
                               <StatusPill status={c.effectiveStatus || c.status} />
+                            </td>
+                          );
+                        }
+                        // Phase 36 §4 — Campaign Budget Fallback. The shared
+                        // column list's own render() stays plain-text (CSV
+                        // export reuses it), so the "Ad Set Budget Applied"
+                        // note is added here instead, same pattern as roas/
+                        // status above.
+                        if (col.key === "budget") {
+                          return (
+                            <td key={col.key} className={`${alignClass} ${pinClass}`} style={style}>
+                              <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
                             </td>
                           );
                         }

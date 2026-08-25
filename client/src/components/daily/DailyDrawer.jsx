@@ -149,7 +149,11 @@ export default function DailyDrawer({ meta, onClose }) {
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <Stat label="24h Window" value={`${displayMeta.date} 00:00 → 23:59 IST`} wide />
-                  <Stat label="Budget" value={formatBudget(data.metrics.budget, data.metrics.budgetType) || "N/A"} />
+                  <Stat
+                    label="Budget"
+                    value={formatBudget(data.metrics.budget, data.metrics.budgetType) || "N/A"}
+                    caption={data.metrics.budgetSource === "adsets" ? "Ad Set Budget Applied" : null}
+                  />
                   <Stat label="Spend" value={currency(data.metrics.spend)} />
                   <Stat label="Orders" value={number(data.metrics.orders)} />
                   <Stat label="Revenue" value={currency(data.metrics.revenue)} />
@@ -303,11 +307,16 @@ export default function DailyDrawer({ meta, onClose }) {
   );
 }
 
-function Stat({ label, value, wide, valueClassName }) {
+// Phase 36 §4 — optional `caption` renders as a small, muted line below the
+// value (never a second top-level Stat) — used only by Budget's "Ad Set
+// Budget Applied" note when the value is a fallback sum rather than a
+// genuine Meta-reported campaign budget. Every other caller is unaffected.
+function Stat({ label, value, wide, valueClassName, caption }) {
   return (
     <div className={`card !p-3.5 ${wide ? "col-span-2 sm:col-span-4" : ""}`}>
       <div className="text-[11px] text-slate-500 mb-0.5">{label}</div>
       <div className={`text-base font-display font-bold text-slate-800 truncate ${valueClassName || ""}`}>{value}</div>
+      {caption && <div className="text-[10px] font-normal text-slate-400 mt-0.5">{caption}</div>}
     </div>
   );
 }

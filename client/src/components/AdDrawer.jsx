@@ -14,6 +14,8 @@ import { roasClass, statusBadgeClass } from "../lib/campaignDisplay";
 import { AdThumbnail } from "./AdCells";
 import { shapeOrdersForPopup } from "../lib/shapeOrder";
 import { useOverlayEscape } from "../lib/overlayStack";
+// Phase 32 §4 — "Open in Meta Ads Manager" button. New, additive import.
+import OpenInMetaButton from "./OpenInMetaButton";
 
 // ─────────────────────────────────────────────────────────────
 // Phase 13 §9 — Ad Drawer. Same self-contained-copy convention as
@@ -133,7 +135,17 @@ export default function AdDrawer() {
                   {" · "}{activeAd?.adId}
                 </p>
               </div>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={closeAd}><X size={14} /></button>
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Phase 32 §4 — real Meta object deep link. */}
+                <OpenInMetaButton
+                  level="ad"
+                  accountId={ad?.accountId}
+                  campaignId={ad?.campaignId || activeAd?.campaignId}
+                  adsetId={ad?.adsetId || activeAd?.adsetId}
+                  adId={activeAd?.adId}
+                />
+                <button type="button" className="btn btn-secondary btn-sm" onClick={closeAd}><X size={14} /></button>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
@@ -175,6 +187,25 @@ export default function AdDrawer() {
                       <AlertTriangle size={14} /> Meta metadata for this ad isn't available (deleted, or the token doesn't have access). Order data below is still shown from Shiprocket's stored attribution.
                     </div>
                   )}
+
+                  {/* Phase 32 §2 — Budget & Bid Cap "where applicable" at
+                      the Ad level. Meta's Graph API has no editable
+                      budget/bid_amount/bid_strategy on the Ad object
+                      itself — those all live on the Campaign/Ad Set — so
+                      this is unconditionally "Not Applicable" here, never
+                      a fabricated ₹0 or a copied-down number pretending
+                      to be the ad's own. Open the Ad Set above (via the
+                      breadcrumb) for its real Budget/Bid Cap/Bid Strategy. */}
+                  <Section title="Budget & Bid Cap" icon={Wallet}>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-3 text-sm">
+                      <Field label="Budget" value={<span className="text-slate-500">Not Applicable</span>} />
+                      <Field label="Bid Cap" value={<span className="text-slate-500">Not Applicable</span>} />
+                      <Field label="Bid Strategy" value={<span className="text-slate-500">Not Applicable</span>} />
+                      <div className="col-span-2 sm:col-span-3 text-[11px] text-slate-400">
+                        Ads don't carry their own Budget, Bid Cap, or Bid Strategy in Meta — these are set at the Campaign or Ad Set level. Open the Ad Set above to view or edit them.
+                      </div>
+                    </div>
+                  </Section>
 
                   <div className="flex flex-wrap gap-3">
                     <Kpi icon={Wallet} label="Spend" value={currency(metrics?.spend)} />

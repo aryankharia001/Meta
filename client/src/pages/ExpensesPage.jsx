@@ -24,6 +24,7 @@ const EXPENSES_STALE_MS = 5 * 60 * 1000;
 
 const SUGGESTED_CATEGORIES = [
   "Employee Salary",
+  "Fixed Expenses",
   "Office Rent",
   "Electricity",
   "Software",

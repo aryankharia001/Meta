@@ -1,241 +1,196 @@
 import express from "express";
-import AbandonedCartOrder from "../models/AbandonedCartOrder.js";
 import { getOrCreateAbandonedCartSettings } from "../models/AbandonedCartSettings.js";
+import TrafleadAbandonedCartLead from "../models/TrafleadAbandonedCartLead.js";
 import { recordActivity } from "../lib/activityLog.js";
-import { toIstDateString } from "../utils/dateIst.js";
+import {
+  getStoredTrafleadLeads,
+  computeAbandonedCartSummary,
+  isDeliveredMatch,
+  getAbandonedCartDailyBreakdown,
+  backfillTrafleadRange,
+  getBackfillState,
+  resolveShipmentMatchesForRange,
+  isPhoneMatchBatchRunning,
+} from "../services/trafleadSyncService.js";
 
 const router = express.Router();
 
 // ─────────────────────────────────────────────────────────────
-// Phase 25 — replaces Phase 22's manual-daily-total CRUD with routes
-// backed by REAL abandoned-cart orders (AbandonedCartOrder, one document
-// per order, written by routes/abandonCartPostback.js). Mounted at
-// /api/abandoned-carts, behind the same global requireAuth gate as
-// every other /api route (see server/index.js) — unlike the postback
-// route, nothing here is public.
+// Phase 33 — REWORKED to read from TrafleadAbandonedCartLead (the exact
+// mirror of Traflead's own "Abandoned Cart" offer leads — see
+// services/trafleadSyncService.js) instead of Phase 25's
+// AbandonedCartOrder (postback-fed from a separate, unrelated raw
+// Shopify-cart-event source — see routes/abandonCartPostback.js's own
+// header comment). AbandonedCartOrder / the postback route are left
+// completely untouched and keep accepting requests (so whatever else
+// posts to them doesn't break); they're just no longer read by anything
+// below — Traflead is now the sole source of truth for every Abandoned
+// Cart surface in this app.
 //
-// §4/§10 — every derived figure (Expected Delivered Orders, Gross
-// Potential Revenue, Recognized Abandoned Cart Revenue, and the four
-// expense lines) is computed HERE, once, in computeSummary() below,
-// using the GLOBAL AbandonedCartSettings (delivery rate + per-order
-// costs — §5) rather than a per-record rate. Both the Management Table
-// (AbandonedCartsPage.jsx) and the Dashboard read the exact same
-// numbers — neither recomputes this math itself.
+// Phase 34 — revenue source changed from lead-status-based recognition
+// to shipment-delivered-date-based recognition.
 //
-// §4 — the response SHAPE of GET / is unchanged from Phase 22
-// (`{ success, records, summary }`, and `summary` has the exact same
-// keys: orders/expectedDelivered/potentialRevenue/recognizedRevenue/
-// totalExpenses/netContribution) so Dashboard.jsx's existing
-// fetchAbandonedCarts({ since, until }) call — and every number it
-// derives from `res.summary` — keeps working unmodified. `records` now
-// additionally supports search/page/pageSize (§3/§6); Dashboard never
-// reads `records`, only `summary`, so this is purely additive from its
-// point of view.
+// Phase 35 — changed AGAIN: revenue is now phone-matched-shipment-status
+// based, attributed to the SELECTED date range (never a delivery date).
+// GET / now reads exactly ONE lead set — the order-date cohort
+// (getStoredTrafleadLeads, unchanged fetch) — and computes the summary
+// straight from it (computeAbandonedCartSummary(cohortLeads, settings),
+// now 2-arg). `deliveredLeads` in the response is that same cohort
+// filtered to isDeliveredMatch() (for the Delivered Revenue drill-down
+// popup) — no second Mongo query needed since there's only one dataset
+// now. GET /daily is for the Daily tab's per-day Leads/Delivered/
+// Delivered Revenue table.
+//
+// GET / never itself calls Traflead's API (a page load must not trigger
+// a live outbound call — same principle services/shiprocketService.js
+// documents for Shiprocket reads). It fires a non-blocking background
+// catch-up sync (skips days already synced, so this is a fast no-op for
+// any range that's already up to date) so a brand-new date range
+// self-heals within moments without the request itself waiting on it,
+// and returns `sync` (the current backfillState) so the UI can show
+// "syncing…" and poll again. The explicit "Refresh from Traflead"
+// button in the UI calls POST /api/traflead-sync/start with
+// force:true for an immediate, guaranteed-fresh re-fetch. The PHONE-
+// matched shipment status (Phase 35) is refreshed independently, in the
+// background, by trafleadSyncCron.js's runShipmentPhoneMatchBatch — see
+// that file and trafleadSyncService.js's Phase 35 header comment for why
+// this never happens synchronously inside a request.
 // ─────────────────────────────────────────────────────────────
-
-// §5 — Expected Delivered Orders = Orders × Delivery Rate. Gross
-// Potential Revenue = sum of every order's own cart value (more
-// accurate than orders × a single average now that real per-order
-// values are stored). Recognized Revenue = Potential Revenue × Delivery
-// Rate — §5's own worked example (100 carts × ₹500 = ₹50,000 potential;
-// at 70% -> ₹35,000 recognized) is exactly potentialRevenue ×
-// deliveryRate, which only equals orders × avgOrderValue × deliveryRate
-// when every cart has the same value, so summing real cart values here
-// is a strict generalization of that example, not a different formula.
-// Expenses are scaled by Expected Delivered Orders, not the raw order
-// count, same reasoning Phase 22 used: a cart only actually incurs
-// manufacturing/packaging/shipping cost once it converts into a real,
-// delivered order.
-function computeSummary(records, settings) {
-  const orders = records.length;
-  const potentialRevenue = records.reduce((sum, r) => sum + (Number(r.cartValue) || 0), 0);
-  const deliveryRate = Number(settings.deliveryRate) || 0;
-  const manufacturingCost = Number(settings.manufacturingCost) || 0;
-  const packagingCost = Number(settings.packagingCost) || 0;
-  const shippingCost = Number(settings.shippingCost) || 0;
-  const miscCost = Number(settings.miscCost) || 0;
-
-  const expectedDelivered = orders * (deliveryRate / 100);
-  const recognizedRevenue = potentialRevenue * (deliveryRate / 100);
-
-  const manufacturingExpense = expectedDelivered * manufacturingCost;
-  const packagingExpense = expectedDelivered * packagingCost;
-  const shippingExpense = expectedDelivered * shippingCost;
-  const miscExpense = expectedDelivered * miscCost;
-  const totalExpenses = manufacturingExpense + packagingExpense + shippingExpense + miscExpense;
-
-  const netContribution = recognizedRevenue - totalExpenses;
-
-  return {
-    orders,
-    deliveryRate,
-    expectedDelivered,
-    potentialRevenue,
-    recognizedRevenue,
-    manufacturingExpense,
-    packagingExpense,
-    shippingExpense,
-    miscExpense,
-    totalExpenses,
-    netContribution,
-  };
-}
 
 function shape(doc) {
   return {
     id: String(doc._id),
-    source: doc.source,
-    abandonedCartId: doc.abandonedCartId,
-    cartId: doc.cartId,
+    trafleadLeadId: doc.trafleadLeadId,
+
+    orderId: doc.orderId,
     externalOrderId: doc.externalOrderId,
-    orderDate: doc.orderDate,
-    orderTimestamp: doc.orderTimestamp,
-    customerName: doc.customerName,
+    subOrderId: doc.subOrderId,
+
+    offerId: doc.offerId,
+    offerName: doc.offerName,
+
+    status: doc.status,
+    previousStatus: doc.previousStatus,
+    lastStatusChange: doc.lastStatusChange,
+
+    shipmentStatus: doc.shipmentStatus,
+    shipmentDeliveredAt: doc.shipmentDeliveredAt,
+    deliveredDateIst: doc.deliveredDateIst,
+    shipmentAwbNumber: doc.shipmentAwbNumber,
+    shipmentCourierName: doc.shipmentCourierName,
+
+    // Phase 35 — phone-matched shipment (see trafleadSyncService.js's
+    // Phase 35 header comment). This, not the embedded shipment* fields
+    // above, is what drives revenue/delivered status as of Phase 35.
+    matchedShipmentFound: doc.matchedShipmentFound,
+    matchedShipmentStatus: doc.matchedShipmentStatus,
+    matchedOrderId: doc.matchedOrderId,
+    matchedAwbNumber: doc.matchedAwbNumber,
+    matchedCourierName: doc.matchedCourierName,
+    matchedDeliveredAt: doc.matchedDeliveredAt,
+    matchMethod: doc.matchMethod,
+    matchedCandidateCount: doc.matchedCandidateCount,
+    shipmentLookupCheckedAt: doc.shipmentLookupCheckedAt,
+    shipmentLookupError: doc.shipmentLookupError,
+
+    fullName: doc.fullName,
     phone: doc.phone,
+    alternatePhone: doc.alternatePhone,
     email: doc.email,
-    cartValue: doc.cartValue,
-    items: doc.items || [],
-    utmCampaign: doc.utmCampaign,
-    adsetName: doc.adsetName,
-    adId: doc.adId,
-    shippingAddress: doc.shippingAddress || {},
-    pincode: doc.pincode,
-    paymentStatus: doc.paymentStatus,
-    checkoutUrl: doc.checkoutUrl,
+
+    productName: doc.productName,
+    quantity: doc.quantity,
+    price: doc.price,
+    total: doc.total,
+    currency: doc.currency,
+    paymentMode: doc.paymentMode,
+
+    address: doc.address,
+    address2: doc.address2,
+    city: doc.city,
+    state: doc.state,
+    district: doc.district,
+    pinCode: doc.pinCode,
+    country: doc.country,
+
+    orderDate: doc.orderDate,
+    orderDateIst: doc.orderDateIst,
+    trafleadCreatedAt: doc.trafleadCreatedAt,
+    trafleadUpdatedAt: doc.trafleadUpdatedAt,
+
+    orderSource: doc.orderSource,
+    webmaster: doc.webmaster,
+    externalWebmasterId: doc.externalWebmasterId,
+    affiliateId: doc.affiliateId,
+    leadSource: doc.leadSource,
+    campaign: doc.campaign,
+    medium: doc.medium,
+    sub1: doc.sub1,
+    sub2: doc.sub2,
+    sub3: doc.sub3,
+    sub4: doc.sub4,
+    sub5: doc.sub5,
+
+    isUrgent: doc.isUrgent,
+    isTestOrder: doc.isTestOrder,
+
     notes: doc.notes || "",
-    rawPayload: doc.rawPayload || {},
-    createdAt: doc.createdAt,
+
+    createdAt: doc.createdAt, // when THIS app last synced this record
     updatedAt: doc.updatedAt,
   };
 }
 
-// §3 — free-text search across customer name/phone/email/cart id/
-// order id/campaign/adset/ad.
-function buildSearchFilter(search) {
-  const q = String(search || "").trim();
-  if (!q) return null;
-  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-  return {
-    $or: [
-      { customerName: re },
-      { phone: re },
-      { email: re },
-      { cartId: re },
-      { externalOrderId: re },
-      { abandonedCartId: re },
-      { utmCampaign: re },
-      { adsetName: re },
-      { adId: re },
-      { "items.name": re },
-      { "items.sku": re },
-    ],
-  };
-}
-
-function buildRangeFilter(since, until) {
-  if (!since && !until) return {};
-  const filter = {};
-  if (since) filter.$gte = since;
-  if (until) filter.$lte = until;
-  return { orderDate: filter };
-}
-
-// ─────────────────────────────────────────────────────────────
-// Dedup for DISPLAY — separate from (and on top of) the write-time
-// dedupeKey guarantee in the postback handler. dedupeKey is keyed off
-// the FIRST identifier available at write time in priority order
-// (externalOrderId -> cartId -> abandonedCartId), so the very same
-// real-world cart can legitimately end up as two documents if it was
-// first postbacked with only a cart_id (dedupeKey "cart:X") and later
-// re-postbacked once it had converted to a real order_id (dedupeKey
-// "order:Y") — same cart, two dedupeKeys. Grouping by "identity" here
-// (cartId, falling back to externalOrderId, then abandonedCartId, then
-// a phone/email+day bucket, then the doc's own _id) catches that case
-// and collapses it to the single most recent record before it's ever
-// counted or shown, without touching the underlying documents.
-function identityKeyExpr() {
-  return {
-    $switch: {
-      branches: [
-        { case: { $and: [{ $ne: ["$cartId", null] }, { $ne: ["$cartId", ""] }] }, then: { $concat: ["cart:", "$cartId"] } },
-        {
-          case: { $and: [{ $ne: ["$externalOrderId", null] }, { $ne: ["$externalOrderId", ""] }] },
-          then: { $concat: ["order:", "$externalOrderId"] },
-        },
-        {
-          case: { $and: [{ $ne: ["$abandonedCartId", null] }, { $ne: ["$abandonedCartId", ""] }] },
-          then: { $concat: ["abandoned:", "$abandonedCartId"] },
-        },
-        {
-          case: { $and: [{ $ne: ["$phone", null] }, { $ne: ["$phone", ""] }] },
-          then: { $concat: ["phone:", "$phone", ":", { $ifNull: ["$orderDate", ""] }] },
-        },
-        {
-          case: { $and: [{ $ne: ["$email", null] }, { $ne: ["$email", ""] }] },
-          then: { $concat: ["email:", "$email", ":", { $ifNull: ["$orderDate", ""] }] },
-        },
-      ],
-      default: { $concat: ["id:", { $toString: "$_id" }] },
-    },
-  };
-}
-
-// Match -> tag each doc with its identity key -> keep only the most
-// recent document per identity key. Returns plain aggregation-pipeline
-// stages so callers can append their own $sort/$skip/$limit/$count
-// afterwards.
-function dedupeStages(matchFilter) {
-  return [
-    { $match: matchFilter },
-    { $addFields: { __identityKey: identityKeyExpr() } },
-    { $sort: { orderTimestamp: -1 } },
-    { $group: { _id: "$__identityKey", doc: { $first: "$$ROOT" } } },
-    { $replaceRoot: { newRoot: "$doc" } },
-  ];
-}
-
 // GET /api/abandoned-carts?since=&until=&search=&page=&pageSize=
-// §4 — Dashboard reads this with since/until set to whatever preset/
-// custom range is selected (no search/page — it only reads `summary`).
-// §3/§9 — the Management Table reads it with search/page/pageSize for
-// the paginated, searchable list; `summary` is always computed over the
-// FULL since/until range regardless of search or pagination, so it
-// stays an accurate range total even while the table itself is
-// filtered/paginated down to a page of matching rows. Both `summary`
-// and `records`/`total` are computed over the DEDUPED set (see
-// dedupeStages() above), so "N abandoned carts in range" and the table
-// row count always agree, and the same real cart never shows twice.
 router.get("/", async (req, res) => {
   try {
     const { since, until, search } = req.query;
+    if (!since || !until) {
+      return res.status(400).json({ success: false, message: "since and until are required (YYYY-MM-DD)" });
+    }
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
 
-    const rangeFilter = buildRangeFilter(since, until);
-    const searchFilter = buildSearchFilter(search);
+    // Non-blocking catch-up sync — see header comment. No-ops fast if
+    // this range is already fully synced.
+    if (!getBackfillState().running) {
+      backfillTrafleadRange(since, until).catch((err) => {
+        console.error(`Background Traflead catch-up sync failed for ${since} → ${until}:`, err.message);
+      });
+    }
 
-    // Summary is always over the full range (never narrowed by search),
-    // so Dashboard's since/until-only call and the management page's
-    // "N abandoned carts in range" figure always agree.
-    const [settings, rangeDocs] = await Promise.all([
+    // Phase 36 §1 — "verify that the Shipment details shown for each order
+    // are actually matching Traflead." Non-blocking, same fire-and-forget
+    // pattern as the order backfill above — never awaited, never delays
+    // this response. Keeps the phone-matched shipment status for THIS
+    // range fresh without waiting on the cron's global, un-scoped queue.
+    // Skips instantly (no-op) if a phone-match batch is already running.
+    if (!isPhoneMatchBatchRunning()) {
+      resolveShipmentMatchesForRange(since, until).catch((err) => {
+        console.error(`Background shipment phone-match resync failed for ${since} → ${until}:`, err.message);
+      });
+    }
+
+    const [settings, rangeLeads] = await Promise.all([
       getOrCreateAbandonedCartSettings(),
-      AbandonedCartOrder.aggregate([...dedupeStages(rangeFilter), { $project: { cartValue: 1 } }]),
+      getStoredTrafleadLeads(since, until),
     ]);
-    const summary = computeSummary(rangeDocs, settings);
+    const summary = computeAbandonedCartSummary(rangeLeads, settings);
+    // Phase 35 — deliveredLeads is just the SAME cohort filtered down,
+    // not a second Mongo query (there's only one dataset now — see the
+    // header comment).
+    const deliveredLeads = rangeLeads.filter((l) => isDeliveredMatch(l));
 
-    const listFilter = searchFilter ? { ...rangeFilter, ...searchFilter } : rangeFilter;
-    const [facetResult] = await AbandonedCartOrder.aggregate([
-      ...dedupeStages(listFilter),
-      { $sort: { orderTimestamp: -1 } },
-      {
-        $facet: {
-          total: [{ $count: "count" }],
-          docs: [{ $skip: (page - 1) * pageSize }, { $limit: pageSize }],
-        },
-      },
-    ]);
-    const total = facetResult?.total?.[0]?.count || 0;
-    const docs = facetResult?.docs || [];
+    const listLeads = search ? await getStoredTrafleadLeads(since, until, { search }) : rangeLeads;
+    const total = listLeads.length;
+    const start = (page - 1) * pageSize;
+    const docs = listLeads.slice(start, start + pageSize);
+
+    // Delivered Revenue drill-down data — capped defensively so a huge
+    // range can't blow up the response; the popup itself narrows the
+    // date range if it needs to see more than this.
+    const DELIVERED_DRILLDOWN_CAP = 1000;
+    const deliveredLeadsForDrilldown = deliveredLeads.slice(0, DELIVERED_DRILLDOWN_CAP);
 
     res.json({
       success: true,
@@ -245,6 +200,9 @@ router.get("/", async (req, res) => {
       pageSize,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
       summary,
+      deliveredLeads: deliveredLeadsForDrilldown.map(shape),
+      deliveredLeadsTruncated: deliveredLeads.length > DELIVERED_DRILLDOWN_CAP,
+      sync: getBackfillState(),
     });
   } catch (err) {
     console.error(err);
@@ -252,14 +210,54 @@ router.get("/", async (req, res) => {
   }
 });
 
-// ── Settings (§5) — must be declared before "/:id" so "settings" never
+// GET /api/abandoned-carts/daily?since=&until= — per-IST-day breakdown
+// for the Daily tab: Leads (order-date cohort) alongside Delivered /
+// Delivered Revenue (delivered-date, any order date) for that same day.
+// Same non-blocking catch-up sync as GET / above.
+router.get("/daily", async (req, res) => {
+  try {
+    const { since, until } = req.query;
+    if (!since || !until) {
+      return res.status(400).json({ success: false, message: "since and until are required (YYYY-MM-DD)" });
+    }
+
+    if (!getBackfillState().running) {
+      backfillTrafleadRange(since, until).catch((err) => {
+        console.error(`Background Traflead catch-up sync failed for ${since} → ${until}:`, err.message);
+      });
+    }
+
+    // Phase 36 §1 — same non-blocking range-scoped shipment verification
+    // as GET / above, so the Daily tab's Delivered/Delivered Revenue
+    // columns stay backed by freshly-checked matches too.
+    if (!isPhoneMatchBatchRunning()) {
+      resolveShipmentMatchesForRange(since, until).catch((err) => {
+        console.error(`Background shipment phone-match resync failed for ${since} → ${until}:`, err.message);
+      });
+    }
+
+    const days = await getAbandonedCartDailyBreakdown(since, until);
+    res.json({ success: true, days, sync: getBackfillState() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── Settings — must be declared before "/:id" so "settings" never
 // matches as an :id lookup. ──
+//
+// Phase 34 — recognizedLeadStatuses/requireShipmentDelivered are gone
+// from this API (still present but unused on the Mongoose model itself,
+// see AbandonedCartSettings.js's header comment) — revenue recognition
+// is no longer settings-configurable at all, it's simply
+// shipment.status === "delivered". Only the four per-delivered-unit cost
+// inputs remain here.
 router.get("/settings", async (req, res) => {
   try {
     const settings = await getOrCreateAbandonedCartSettings();
     res.json({
       success: true,
-      deliveryRate: settings.deliveryRate,
       manufacturingCost: settings.manufacturingCost,
       packagingCost: settings.packagingCost,
       shippingCost: settings.shippingCost,
@@ -273,11 +271,8 @@ router.get("/settings", async (req, res) => {
 
 router.put("/settings", async (req, res) => {
   try {
-    const { deliveryRate, manufacturingCost, packagingCost, shippingCost, miscCost } = req.body || {};
-    const rate = Number(deliveryRate);
-    if (deliveryRate === undefined || isNaN(rate) || rate < 0 || rate > 100) {
-      return res.status(400).json({ success: false, message: "deliveryRate must be a number between 0 and 100" });
-    }
+    const { manufacturingCost, packagingCost, shippingCost, miscCost } = req.body || {};
+
     for (const [label, val] of [
       ["manufacturingCost", manufacturingCost],
       ["packagingCost", packagingCost],
@@ -290,7 +285,6 @@ router.put("/settings", async (req, res) => {
     }
 
     const settings = await getOrCreateAbandonedCartSettings();
-    settings.deliveryRate = rate;
     if (manufacturingCost !== undefined) settings.manufacturingCost = Number(manufacturingCost) || 0;
     if (packagingCost !== undefined) settings.packagingCost = Number(packagingCost) || 0;
     if (shippingCost !== undefined) settings.shippingCost = Number(shippingCost) || 0;
@@ -300,14 +294,13 @@ router.put("/settings", async (req, res) => {
     await recordActivity({
       user: req.user?.email,
       type: "abandoned_cart_settings_updated",
-      message: `Abandoned cart settings updated (delivery rate ${settings.deliveryRate}%)`,
+      message: "Abandoned cart per-delivered-unit expense settings updated",
       entityType: "abandonedCartSettings",
       entityId: String(settings._id),
     });
 
     res.json({
       success: true,
-      deliveryRate: settings.deliveryRate,
       manufacturingCost: settings.manufacturingCost,
       packagingCost: settings.packagingCost,
       shippingCost: settings.shippingCost,
@@ -319,11 +312,11 @@ router.put("/settings", async (req, res) => {
   }
 });
 
-// §3 — "View details."
+// "View details."
 router.get("/:id", async (req, res) => {
   try {
-    const doc = await AbandonedCartOrder.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: "Abandoned cart record not found" });
+    const doc = await TrafleadAbandonedCartLead.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: "Abandoned cart lead not found" });
     res.json({ success: true, record: shape(doc) });
   } catch (err) {
     console.error(err);
@@ -331,101 +324,34 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// §3 — "Edit." Corrects a real order's fields (e.g. a mis-parsed
-// customer name/product) — never touches dedupeKey/source, and
-// re-derives orderDate from orderTimestamp if the timestamp is edited,
-// so the two never drift apart.
+// Every field here is sourced from Traflead and overwritten on the next
+// sync — editing it locally would just be silently reverted, so the
+// only thing this app is allowed to write itself is the ops-local
+// `notes` field (never sent to/from Traflead).
 router.put("/:id", async (req, res) => {
   try {
-    const doc = await AbandonedCartOrder.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: "Abandoned cart record not found" });
+    const doc = await TrafleadAbandonedCartLead.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: "Abandoned cart lead not found" });
 
-    const {
-      customerName,
-      phone,
-      email,
-      cartValue,
-      items,
-      utmCampaign,
-      adsetName,
-      adId,
-      shippingAddress,
-      paymentStatus,
-      checkoutUrl,
-      orderTimestamp,
-      notes,
-    } = req.body || {};
-
-    if (customerName !== undefined) doc.customerName = String(customerName).trim();
-    if (phone !== undefined) doc.phone = String(phone).trim();
-    if (email !== undefined) doc.email = String(email).trim();
-    if (cartValue !== undefined) doc.cartValue = Math.max(0, Number(cartValue) || 0);
-    if (Array.isArray(items)) {
-      doc.items = items.map((it) => ({
-        name: String(it?.name || "").trim(),
-        sku: String(it?.sku || "").trim(),
-        variantId: String(it?.variantId || "").trim(),
-        quantity: Math.max(0, Number(it?.quantity) || 0),
-        price: Math.max(0, Number(it?.price) || 0),
-      }));
+    const { notes } = req.body || {};
+    if (notes === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Only `notes` can be edited here — every other field is synced from Traflead and would be overwritten on the next sync.",
+      });
     }
-    if (utmCampaign !== undefined) doc.utmCampaign = String(utmCampaign).trim();
-    if (adsetName !== undefined) doc.adsetName = String(adsetName).trim();
-    if (adId !== undefined) doc.adId = String(adId).trim();
-    if (shippingAddress && typeof shippingAddress === "object") {
-      doc.shippingAddress = {
-        line1: String(shippingAddress.line1 || "").trim(),
-        line2: String(shippingAddress.line2 || "").trim(),
-        city: String(shippingAddress.city || "").trim(),
-        state: String(shippingAddress.state || "").trim(),
-        pincode: String(shippingAddress.pincode || "").trim(),
-        country: String(shippingAddress.country || "").trim(),
-      };
-      doc.pincode = doc.shippingAddress.pincode;
-    }
-    if (paymentStatus !== undefined) doc.paymentStatus = String(paymentStatus).trim();
-    if (checkoutUrl !== undefined) doc.checkoutUrl = String(checkoutUrl).trim();
-    if (notes !== undefined) doc.notes = String(notes).trim();
-    if (orderTimestamp) {
-      const ts = new Date(orderTimestamp);
-      if (!isNaN(ts.getTime())) {
-        doc.orderTimestamp = ts;
-        doc.orderDate = toIstDateString(ts);
-      }
-    }
-
+    doc.notes = String(notes).trim();
     await doc.save();
 
     await recordActivity({
       user: req.user?.email,
-      type: "abandoned_cart_updated",
-      message: `Abandoned cart record updated (${doc.orderDate} — ${doc.customerName || doc.phone || doc.cartId})`,
+      type: "abandoned_cart_note_updated",
+      message: `Abandoned cart note updated (${doc.orderDateIst} — ${doc.fullName || doc.phone || doc.orderId})`,
       entityType: "abandonedCart",
       entityId: String(doc._id),
     });
 
     res.json({ success: true, record: shape(doc) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// §3 — "Delete."
-router.delete("/:id", async (req, res) => {
-  try {
-    const doc = await AbandonedCartOrder.findByIdAndDelete(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: "Abandoned cart record not found" });
-
-    await recordActivity({
-      user: req.user?.email,
-      type: "abandoned_cart_deleted",
-      message: `Abandoned cart record deleted (${doc.orderDate} — ${doc.customerName || doc.phone || doc.cartId})`,
-      entityType: "abandonedCart",
-      entityId: String(doc._id),
-    });
-
-    res.json({ success: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: err.message });

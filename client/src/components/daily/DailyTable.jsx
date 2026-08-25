@@ -6,7 +6,7 @@ import ColumnSettingsMenu from "../ColumnSettingsMenu";
 import { downloadCsv } from "../../lib/csv";
 import { currency, number } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
-import { LiveIndicator, RoasValue, StatusPill } from "../CampaignCells";
+import { LiveIndicator, RoasValue, StatusPill, BudgetCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 — the Daily page's main table. Two view modes over the same
@@ -241,6 +241,17 @@ function DailyRowCell({ col, row }) {
     return (
       <td className="num">
         <RoasValue roas={row.roas} />
+      </td>
+    );
+  }
+  // Phase 36 §4 — Campaign Budget Fallback caption. col.render() stays
+  // plain-text (CSV export reuses dailyColumns.js's definitions), so the
+  // "Ad Set Budget Applied" note is added here instead, same pattern as
+  // campaignName/status/roas above.
+  if (col.key === "budget") {
+    return (
+      <td className="num">
+        <BudgetCell budget={row.budget} budgetType={row.budgetType} budgetSource={row.budgetSource} />
       </td>
     );
   }

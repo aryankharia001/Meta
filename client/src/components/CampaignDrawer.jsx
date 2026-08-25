@@ -30,8 +30,12 @@ import {
   Info,
   FileText,
   Layers,
+  PiggyBank,
+  ShoppingBag,
+  ExternalLink,
 } from "lucide-react";
-import { fetchCampaignDetails, logActivity } from "../lib/api";
+import { Link } from "react-router-dom";
+import { fetchCampaignDetails, logActivity, fetchProfitCampaigns } from "../lib/api";
 import { getCachedCampaignDetails, setCachedCampaignDetails } from "../lib/campaignDetailsCache";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
@@ -44,6 +48,8 @@ import InfoModal from "./InfoModal";
 import OrdersListPopup from "./OrdersListPopup";
 import FavoriteButton from "./FavoriteButton";
 import EntityNotesPanel from "./EntityNotesPanel";
+// Phase 32 §4 — "Open in Meta Ads Manager" button. New, additive import.
+import OpenInMetaButton from "./OpenInMetaButton";
 // Phase 27 — Budget & Bid Cap Control section. New, additive import;
 // nothing above/below this line is touched.
 import BudgetBidControlSection from "./control/BudgetBidControlSection";
@@ -276,7 +282,56 @@ export default function CampaignDrawer() {
     return () => { cancelled = true; };
   }, [activeCampaign?.tokenId, activeCampaign?.campaignId, activeCampaign?.since, activeCampaign?.until]);
 
+  // `details` is declared here (moved up from its original spot further
+  // below) because the Phase 32 §5 effect immediately below reads
+  // `details?.campaign?.accountId` in its dependency array. That
+  // dependency array is evaluated synchronously during render, so
+  // `details` must already be initialized by the time this line runs —
+  // declaring it after this block (as originally written) left it in the
+  // temporal dead zone here and threw "Cannot access 'details' before
+  // initialization" on every mount. Nothing about `details`' behavior
+  // changes, only where it's declared.
   const [details, setDetails] = useState(null);
+
+  // Phase 32 §5 — Profit & Cost Breakdown for this one campaign. Reuses
+  // the existing, already-audited GET /profitability/:tokenId/campaigns
+  // endpoint (same numbers the Profitability page's Campaign-Wise Profit
+  // table and "Advertising Expense" drill-down already show) filtered
+  // down to this campaignId — never a second, independently-computed
+  // profit calculation living in this drawer. Own state/effect, same
+  // "can't block or break the rest of the drawer" isolation as the Ad
+  // Sets fetch above. Requires a known ad account ID (the endpoint is
+  // account-scoped); when that isn't available in this context, the
+  // section below explains why rather than silently showing nothing.
+  const [campaignProfit, setCampaignProfit] = useState(null);
+  const [campaignProfitLoading, setCampaignProfitLoading] = useState(false);
+  const [campaignProfitError, setCampaignProfitError] = useState("");
+  const loadCampaignProfit = () => {
+    const tokenId = activeCampaign?.tokenId;
+    const campaignId = activeCampaign?.campaignId;
+    const accountId = activeCampaign?.accountId || details?.campaign?.accountId;
+    if (!tokenId || !campaignId || !accountId) {
+      setCampaignProfit(null);
+      return;
+    }
+    let cancelled = false;
+    setCampaignProfitLoading(true);
+    setCampaignProfitError("");
+    fetchProfitCampaigns(tokenId, { accountIds: [accountId], since: activeCampaign.since, until: activeCampaign.until })
+      .then((res) => {
+        if (cancelled) return;
+        const row = (res.campaigns || []).find((c) => c.campaignId === campaignId);
+        setCampaignProfit(row || null);
+      })
+      .catch((err) => !cancelled && setCampaignProfitError(err.message || "Failed to load profit breakdown"))
+      .finally(() => !cancelled && setCampaignProfitLoading(false));
+    return () => { cancelled = true; };
+  };
+  useEffect(() => {
+    return loadCampaignProfit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCampaign?.tokenId, activeCampaign?.campaignId, activeCampaign?.accountId, activeCampaign?.since, activeCampaign?.until, details?.campaign?.accountId]);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -728,6 +783,15 @@ export default function CampaignDrawer() {
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
+                  {/* Phase 32 §4 — real Meta object deep link, not the
+                      generic Ads Manager homepage. Disabled with a
+                      tooltip when the account ID isn't known yet rather
+                      than linking somewhere generic. */}
+                  <OpenInMetaButton
+                    level="campaign"
+                    accountId={details.campaign.accountId || activeCampaign?.accountId}
+                    campaignId={details.campaign.id}
+                  />
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm"
@@ -766,14 +830,19 @@ export default function CampaignDrawer() {
 
               {/* Campaign info strip */}
               <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-xs text-slate-500">
-                {/* Phase 31 §2 — consolidated budget: the genuine Meta
-                    campaign-level budget when set, else the sum of each
-                    ad set's own budget (grouped by daily/lifetime cadence,
-                    never added together — see consolidatedCampaignBudget()). */}
+                {/* Phase 31 §2 / Phase 36 §4 — consolidated budget: the
+                    genuine Meta campaign-level budget when set, else the sum
+                    of each ad set's own budget (grouped by daily/lifetime
+                    cadence, never added together — see
+                    consolidatedCampaignBudget()). The label always stays
+                    "Campaign Budget" — a fallback sum is called out with a
+                    small "Ad Set Budget Applied" caption below the value
+                    instead of a renamed label or a second field. */}
                 <InfoBit
                   icon={Wallet}
-                  label={budgetInfo.source === "adsets" ? "Campaign Budget (Ad Set Sum)" : "Campaign Budget"}
+                  label="Campaign Budget"
                   value={budgetInfo.display}
+                  caption={budgetInfo.source === "adsets" ? "Ad Set Budget Applied" : null}
                 />
                 <InfoBit icon={Target} label="Objective" value={details.campaign.objective || "N/A"} />
                 <InfoBit icon={Tag} label="Buying Type" value={details.campaign.buyingType || "N/A"} />
@@ -857,6 +926,111 @@ export default function CampaignDrawer() {
                 {!details.metaInsights && (
                   <p className="text-xs text-slate-400 mt-2">Meta didn't return insights for this campaign in this date range.</p>
                 )}
+              </section>
+
+              {/* Phase 32 §5 — Profit & Cost Breakdown, reusing the
+                  existing profitability/:tokenId/campaigns endpoint (see
+                  loadCampaignProfit above) — not a new profit calculation. */}
+              <section>
+                <SectionTitle icon={PiggyBank}>Profit & Cost Breakdown</SectionTitle>
+                {!(activeCampaign?.accountId || details.campaign.accountId) ? (
+                  <div className="card text-sm text-slate-400 text-center py-6">
+                    Ad account isn't known for this campaign in this context, so a cost-inclusive profit breakdown can't be computed here.
+                  </div>
+                ) : campaignProfitLoading && !campaignProfit ? (
+                  <div className="card text-sm text-slate-400 text-center py-6">Loading…</div>
+                ) : campaignProfitError ? (
+                  <div className="card text-center py-6 flex flex-col items-center gap-2">
+                    <span className="text-sm text-rose-500">{campaignProfitError}</span>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={loadCampaignProfit}>
+                      <RefreshCw size={13} /> Try again
+                    </button>
+                  </div>
+                ) : !campaignProfit ? (
+                  <div className="card text-sm text-slate-400 text-center py-6">
+                    No matched orders for this campaign in this date range — nothing to compute a profit breakdown from yet.
+                  </div>
+                ) : (
+                  <div className="card p-0 overflow-hidden">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-y divide-slate-100">
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Total Recognized Revenue</div>
+                        <div className="text-sm font-semibold text-slate-700">{currency(campaignProfit.totalRecognizedRevenue)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Total Expenses</div>
+                        <div className="text-sm font-semibold text-slate-700">{currency(campaignProfit.totalExpenses)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Net Profit</div>
+                        <div className={`text-sm font-semibold ${campaignProfit.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {currency(campaignProfit.netProfit)}
+                        </div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Profit Margin</div>
+                        <div className={`text-sm font-semibold ${campaignProfit.netProfit >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {percent(campaignProfit.profitMargin)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 divide-x divide-y divide-slate-100 border-t border-slate-100">
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Product / Manufacturing</div>
+                        <div className="text-sm font-medium text-slate-700">{currency(campaignProfit.productCost)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Packaging</div>
+                        <div className="text-sm font-medium text-slate-700">{currency(campaignProfit.packagingCost)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Shipping</div>
+                        <div className="text-sm font-medium text-slate-700">{currency(campaignProfit.shippingCost)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Ad Spend</div>
+                        <div className="text-sm font-medium text-slate-700">{currency(campaignProfit.spend)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Allocated Operating Expenses</div>
+                        <div className="text-sm font-medium text-slate-700">{currency(campaignProfit.operatingExpense)}</div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] text-slate-400 mb-1">Other Per-Order Cost</div>
+                        <div className="text-sm font-medium text-slate-700">{currency(campaignProfit.otherCost)}</div>
+                      </div>
+                    </div>
+                    <div className="px-3.5 py-2 border-t border-slate-100 text-[11px] text-slate-400">
+                      Operating expenses (rent, salaries, and other configured expenses) are allocated to this campaign proportional to its share of total recognized revenue in range — the same method the Profitability page uses.
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {/* Phase 33 — Abandoned Cart (Traflead). Traflead's synced
+                  leads carry their OWN free-text `campaign` field (see
+                  services/trafleadSyncService.js's header comment — Traflead
+                  has no confirmed structural link, like a shared campaign
+                  ID, tying a lead back to a specific Meta campaign), so
+                  this is deliberately a manual, transparent SEARCH by this
+                  campaign's name rather than a claimed exact match/count —
+                  showing a confident-looking "0" here when the real
+                  attribution field just doesn't line up would be worse
+                  than not showing a number at all. */}
+              <section>
+                <SectionTitle icon={ShoppingBag}>Abandoned Cart (Traflead)</SectionTitle>
+                <div className="card text-xs text-slate-500 flex items-center justify-between gap-3">
+                  <span>
+                    Traflead's synced Abandoned Cart leads don't carry a confirmed campaign-ID link back to Meta — search by this
+                    campaign's name in the Abandoned Carts page instead of a possibly-wrong automatic match.
+                  </span>
+                  <Link
+                    to={`/abandoned-carts?since=${details?.since || ""}&until=${details?.until || ""}&search=${encodeURIComponent(details.campaign.name || "")}`}
+                    className="btn btn-secondary btn-sm shrink-0"
+                  >
+                    Search Traflead <ExternalLink size={12} />
+                  </Link>
+                </div>
               </section>
 
               {/* Insights */}
@@ -1137,12 +1311,21 @@ function SectionTitle({ icon: Icon, children, noMargin }) {
   );
 }
 
-function InfoBit({ icon: Icon, label, value }) {
+// Phase 36 §4 — optional `caption` renders as a small, muted line below the
+// value (never a second top-level InfoBit/field) — used only by Campaign
+// Budget's "Ad Set Budget Applied" note when the value shown is a fallback
+// sum rather than a genuine Meta-reported campaign budget. Every other
+// caller is unaffected — no caption means this renders exactly as before.
+function InfoBit({ icon: Icon, label, value, caption }) {
   return (
-    <span className="inline-flex items-center gap-1.5" title={label}>
-      <Icon size={12} className="text-slate-300" />
-      <span className="text-slate-400">{label}:</span>
-      <span className="font-medium text-slate-600">{value}</span>
+    <span className="inline-flex items-start gap-1.5" title={label}>
+      <Icon size={12} className="text-slate-300 mt-0.5" />
+      <span className="flex flex-col leading-tight">
+        <span>
+          <span className="text-slate-400">{label}:</span> <span className="font-medium text-slate-600">{value}</span>
+        </span>
+        {caption && <span className="text-[10px] text-slate-400">{caption}</span>}
+      </span>
     </span>
   );
 }

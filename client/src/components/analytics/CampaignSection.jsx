@@ -78,7 +78,7 @@ export default function CampaignSection({ campaignData, tokenId, since, until })
         </div>
       </td>
       <td className="num">
-        <BudgetCell budget={c.budget} budgetType={c.budgetType} />
+        <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
       </td>
       <td className="num metric-primary">{currency(c.spend)}</td>
       <td className="num metric-primary">{currency(c.revenue)}</td>

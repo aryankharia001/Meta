@@ -64,6 +64,11 @@ const ADSET_FIELDS = [
   // AdSetDrawer.jsx's new Budget & Bid Cap Control section show a real
   // current bid cap instead of just the bid_strategy name.
   "bid_amount",
+  // Phase 32 §2/§4 — account_id, straight from Meta on the ad set node
+  // itself (no extra request). Exposed in /:adsetId/details below as
+  // adset.accountId so AdSetDrawer.jsx can build a real "Open in Meta
+  // Ads Manager" deep link (act=<accountId>) without guessing.
+  "account_id",
   "targeting", "created_time", "updated_time",
 ].join(",");
 
@@ -479,6 +484,14 @@ router.get("/:tokenId/:adsetId/details", async (req, res) => {
             effectiveStatus: meta.effective_status || null,
             budget,
             budgetType,
+            // Phase 32 §2 — real Meta bid_amount (minor units -> real
+            // currency, same convention deriveBudget() already applies to
+            // daily_budget/lifetime_budget above), null when Meta doesn't
+            // return one — never a fabricated ₹0. CurrentValuesCard.jsx's
+            // Budget & Bid Cap Control section already shows this same
+            // value live via a separate endpoint; this lets the drawer's
+            // static "Ad Set Information" section show it too.
+            bidAmount: meta.bid_amount !== undefined && meta.bid_amount !== null && meta.bid_amount !== "" ? Number(meta.bid_amount) / 100 : null,
             startTime: meta.start_time || null,
             endTime: meta.end_time || null,
             optimizationGoal: meta.optimization_goal || null,
@@ -487,6 +500,10 @@ router.get("/:tokenId/:adsetId/details", async (req, res) => {
             targetingSummary: summarizeTargeting(meta.targeting),
             createdTime: meta.created_time || null,
             updatedTime: meta.updated_time || null,
+            // Phase 32 §4 — ad account ID, straight from Meta. Powers the
+            // "Open in Meta Ads Manager" deep link; null (never guessed)
+            // when Meta didn't return it.
+            accountId: meta.account_id ? String(meta.account_id) : null,
           }
         : { adsetId, adsetName: "Unavailable", metaAvailable: false },
       metaInsights: insights

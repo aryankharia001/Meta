@@ -26,6 +26,7 @@ import ComparisonPanel from "../components/campaignExplorer/ComparisonPanel";
 import MoreFiltersPanel, { DEFAULT_FILTERS, applyExplorerFilters, countActiveFilters } from "../components/campaignExplorer/MoreFiltersPanel";
 import { ALL_COLUMNS } from "../lib/campaignExplorerColumns";
 import { currency, number } from "../lib/format";
+import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
 
 // Phase 18 (part 2) — the server's own campaignExplorer.js route caches
 // for 45s (see campaignExplorerCache.js's file banner); matching that
@@ -331,6 +332,8 @@ export default function CampaignExplorerPage() {
         </div>
 
         <LiveMonitoringSection tokenId={TOKEN_ID} accountIds={selectedAccounts} onOpenCampaign={handleOpenCampaign} />
+
+        <AbandonedCartSummaryCard since={since} until={until} className="mb-4" />
 
         {/* ── Filter bar ─────────────────────────────────────── */}
         <div className="flex flex-wrap items-center gap-2.5 mb-3.5">

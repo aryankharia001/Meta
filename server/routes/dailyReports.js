@@ -196,7 +196,7 @@ function enumerateDays(since, until) {
   return days;
 }
 
-function buildRow({ date, campaignId, campaignName, accountId, accountName, status, effectiveStatus, budget = null, budgetType = null, spend, orders, isUnmatched = false }) {
+function buildRow({ date, campaignId, campaignName, accountId, accountName, status, effectiveStatus, budget = null, budgetType = null, budgetSource = "none", spend, orders, isUnmatched = false }) {
   const totalOrders = orders.length;
   const revenue = orders.reduce((s, o) => s + Number(o.totalAmountPayable || 0), 0);
   let codOrders = 0,
@@ -235,6 +235,7 @@ function buildRow({ date, campaignId, campaignName, accountId, accountName, stat
     effectiveStatus: effectiveStatus || null,
     budget,
     budgetType,
+    budgetSource,
     isUnmatched,
 
     spend: Math.round(spendNum * 100) / 100,
@@ -374,8 +375,56 @@ router.get("/:tokenId", async (req, res) => {
           effectiveStatus: c.effective_status || null,
           budget,
           budgetType,
+          budgetSource: budget !== null ? "campaign" : "none",
         });
       });
+
+      // Phase 36 §4 — Campaign Budget Fallback, same approach as
+      // campaigns.js's /compare: only bother fetching this account's ad
+      // sets when at least one of its campaigns has no genuine
+      // campaign-level budget, and only ever fall back for those specific
+      // campaigns — a real campaign-level budget above is never replaced.
+      const idsMissingBudget = metaList.filter((c) => !deriveBudget(c).budget).map((c) => String(c.id));
+      if (idsMissingBudget.length > 0) {
+        const missingSet = new Set(idsMissingBudget);
+        try {
+          const adsetList = await fetchAllPages(
+            `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget")}&limit=500&access_token=${token.accessToken}`
+          );
+          const sumByCampaignId = new Map();
+          adsetList.forEach((a) => {
+            const cid = String(a.campaign_id || "");
+            if (!cid || !missingSet.has(cid)) return;
+            const { budget: adsetBudget, budgetType: adsetBudgetType } = deriveBudget(a);
+            if (adsetBudget === null) return;
+            const entry = sumByCampaignId.get(cid) || { dailyTotal: 0, lifetimeTotal: 0, hasDaily: false, hasLifetime: false };
+            if (adsetBudgetType === "daily") {
+              entry.dailyTotal += adsetBudget;
+              entry.hasDaily = true;
+            } else if (adsetBudgetType === "lifetime") {
+              entry.lifetimeTotal += adsetBudget;
+              entry.hasLifetime = true;
+            }
+            sumByCampaignId.set(cid, entry);
+          });
+          sumByCampaignId.forEach((sum, cid) => {
+            const entry = campaignMeta.get(cid);
+            if (!entry) return;
+            if (sum.hasDaily) {
+              entry.budget = sum.dailyTotal;
+              entry.budgetType = "daily";
+            } else if (sum.hasLifetime) {
+              entry.budget = sum.lifetimeTotal;
+              entry.budgetType = "lifetime";
+            } else {
+              return;
+            }
+            entry.budgetSource = "adsets";
+          });
+        } catch (err) {
+          console.log(`Ad set budget fallback fetch failed for ${actId}: ${err.message}`);
+        }
+      }
 
       dailyInsights.forEach((row) => {
         insightRows.push(row);
@@ -456,6 +505,7 @@ router.get("/:tokenId", async (req, res) => {
             effectiveStatus: meta.effectiveStatus,
             budget: meta.budget,
             budgetType: meta.budgetType,
+            budgetSource: meta.budgetSource || "none",
             spend: insightsByDayCampaign.get(`${date}|${campaignId}`) || 0,
             orders: campaignOrders,
           })
@@ -527,6 +577,7 @@ router.get("/:tokenId/detail", async (req, res) => {
     let spend = 0;
     let budget = null;
     let budgetType = null;
+    let budgetSource = "none";
     if (!isUnmatched) {
       for (const acc of candidateAccountIds) {
         const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
@@ -557,10 +608,48 @@ router.get("/:tokenId/detail", async (req, res) => {
           const hit = list.find((c) => String(c.id) === String(campaignId));
           if (hit) {
             ({ budget, budgetType } = deriveBudget(hit));
+            if (budget !== null) budgetSource = "campaign";
             break;
           }
         } catch (err) {
           console.log(`Daily detail budget fetch failed for ${actId}: ${err.message}`);
+        }
+      }
+
+      // Phase 36 §4 — Campaign Budget Fallback: no genuine campaign-level
+      // budget found above (Advantage+/CBO-off) — fall back to the sum of
+      // THIS campaign's own Ad Set budgets, one bulk /adsets call per
+      // candidate account, same convention as /:tokenId above and
+      // campaigns.js's /compare.
+      if (budget === null) {
+        for (const acc of candidateAccountIds) {
+          const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
+          try {
+            const adsetList = await fetchAllPages(
+              `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget")}&limit=500&access_token=${token.accessToken}`
+            );
+            let dailyTotal = 0, lifetimeTotal = 0, hasDaily = false, hasLifetime = false;
+            adsetList.forEach((a) => {
+              if (String(a.campaign_id || "") !== String(campaignId)) return;
+              const { budget: adsetBudget, budgetType: adsetBudgetType } = deriveBudget(a);
+              if (adsetBudget === null) return;
+              if (adsetBudgetType === "daily") {
+                dailyTotal += adsetBudget;
+                hasDaily = true;
+              } else if (adsetBudgetType === "lifetime") {
+                lifetimeTotal += adsetBudget;
+                hasLifetime = true;
+              }
+            });
+            if (hasDaily || hasLifetime) {
+              budget = hasDaily ? dailyTotal : lifetimeTotal;
+              budgetType = hasDaily ? "daily" : "lifetime";
+              budgetSource = "adsets";
+              break;
+            }
+          } catch (err) {
+            console.log(`Daily detail ad set budget fallback fetch failed for ${actId}: ${err.message}`);
+          }
         }
       }
     }
@@ -604,6 +693,7 @@ router.get("/:tokenId/detail", async (req, res) => {
       effectiveStatus: null,
       budget,
       budgetType,
+      budgetSource,
       spend,
       orders: matchingOrders,
       isUnmatched,

@@ -282,6 +282,19 @@ router.get("/:tokenId/compare", async (req, res) => {
     // next to Campaign Name.
     const metaByCampaignId = new Map();
 
+    // Phase 36 §4 — Campaign Budget Fallback. campaign_id -> { dailyTotal,
+    // lifetimeTotal, hasDaily, hasLifetime }, built ONLY for campaigns whose
+    // own daily_budget/lifetime_budget came back null/absent above (i.e.
+    // Advantage+/CBO-off campaigns using Ad Set-level budgets instead) — see
+    // the per-account block below. A campaign that already has a genuine
+    // Meta-reported budget never needs this and never triggers the extra
+    // fetch, so accounts where every campaign already has its own budget
+    // pay zero extra Graph API cost. When it IS needed, it's ONE bulk
+    // /adsets call per account (paginated), never one call per campaign —
+    // same "bulk, not per-item" principle Phase 35's phone-match batching
+    // already established.
+    const adSetBudgetByCampaignId = new Map();
+
     for (const accountId of accountIds) {
       const actId = accountId.startsWith("act_")
         ? accountId
@@ -320,6 +333,46 @@ router.get("/:tokenId/compare", async (req, res) => {
           effectiveStatus: c.effective_status || null,
         });
       });
+
+      // Phase 36 §4 — only bother fetching this account's ad sets when at
+      // least one of its campaigns has no genuine campaign-level budget.
+      const campaignIdsMissingBudget = metaData
+        .filter((c) => !deriveBudget(c).budget)
+        .map((c) => String(c.id));
+
+      if (campaignIdsMissingBudget.length > 0) {
+        const missingSet = new Set(campaignIdsMissingBudget);
+        const adsetBudgetUrl =
+          `https://graph.facebook.com/v19.0/${actId}/adsets` +
+          `?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget")}&limit=500&access_token=${token.accessToken}`;
+        try {
+          const adsetList = await fetchAllPages(adsetBudgetUrl);
+          adsetList.forEach((a) => {
+            const cid = String(a.campaign_id || "");
+            // Only campaigns actually missing their own budget need a sum —
+            // never overrides a genuine campaign-level budget.
+            if (!cid || !missingSet.has(cid)) return;
+            const { budget: adsetBudget, budgetType: adsetBudgetType } = deriveBudget(a);
+            if (adsetBudget === null) return; // this ad set has no budget of its own either
+            const entry = adSetBudgetByCampaignId.get(cid) || {
+              dailyTotal: 0,
+              lifetimeTotal: 0,
+              hasDaily: false,
+              hasLifetime: false,
+            };
+            if (adsetBudgetType === "daily") {
+              entry.dailyTotal += adsetBudget;
+              entry.hasDaily = true;
+            } else if (adsetBudgetType === "lifetime") {
+              entry.lifetimeTotal += adsetBudget;
+              entry.hasLifetime = true;
+            }
+            adSetBudgetByCampaignId.set(cid, entry);
+          });
+        } catch (err) {
+          console.log(`Ad set budget fallback fetch failed for ${actId}: ${err.message}`);
+        }
+      }
 
       (data.data || []).forEach((campaign) => {
         fbCampaigns.push({
@@ -422,7 +475,35 @@ if (campaignOrders.length) {
       totalImpressions += impressions;
 
       const meta = metaByCampaignId.get(campaignId) || {};
-      const { budget = null, budgetType = null, status = null, effectiveStatus = null } = meta;
+      let { budget = null, budgetType = null, status = null, effectiveStatus = null } = meta;
+
+      // Phase 36 §4 — Campaign Budget Fallback: when Meta reports no
+      // genuine campaign-level budget (Advantage+/CBO-off, ad-set-level
+      // budgeting), fall back to the sum of this campaign's own Ad Set
+      // budgets (computed above, bulk-fetched once per account) rather
+      // than showing "N/A". A genuine campaign-level budget above always
+      // wins and is never replaced. budgetSource tells the client which
+      // one it's looking at, so the UI can show a small "Ad Set Budget
+      // Applied" note without inventing a second budget field.
+      let budgetSource = budget !== null && budget !== undefined ? "campaign" : "none";
+      if (budgetSource === "none") {
+        const sum = adSetBudgetByCampaignId.get(campaignId);
+        if (sum && (sum.hasDaily || sum.hasLifetime)) {
+          // Never adds a daily total to a lifetime total. In the rare case
+          // a campaign's ad sets mix cadences, the daily total is shown
+          // (the more common, more actionable cadence) — the Campaign
+          // Drawer's own consolidated view shows the full daily+lifetime
+          // breakdown for this same rare case.
+          if (sum.hasDaily) {
+            budget = sum.dailyTotal;
+            budgetType = "daily";
+          } else {
+            budget = sum.lifetimeTotal;
+            budgetType = "lifetime";
+          }
+          budgetSource = "adsets";
+        }
+      }
 
       return {
         accountId: campaign.accountId,
@@ -434,6 +515,7 @@ if (campaignOrders.length) {
 
         budget,
         budgetType,
+        budgetSource,
         status,
         effectiveStatus,
 
@@ -749,6 +831,12 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       // routes/campaignControl.js's header comment — but bid_strategy
       // is still useful read-only context when Meta returns one).
       "bid_strategy",
+      // Phase 32 §4 — account_id, as a fallback source for the "Open in
+      // Meta Ads Manager" deep link on the rare path where the ?accountId
+      // query param below is absent. The query param (already passed by
+      // every caller of this route today) still takes priority — this
+      // never overrides a value the client already sent.
+      "account_id",
     ].join(",");
 
     let campaignMeta = null;
@@ -854,7 +942,11 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
         stopTime: campaignMeta?.stop_time || null,
         createdTime: campaignMeta?.created_time || null,
         updatedTime: campaignMeta?.updated_time || null,
-        accountId: accountId || null,
+        // Phase 32 §4 — prefer the caller-supplied accountId (unchanged
+        // default), fall back to Meta's own account_id on the campaign
+        // node when it wasn't supplied, rather than ever leaving this
+        // null when a real value is available.
+        accountId: accountId || (campaignMeta?.account_id ? String(campaignMeta.account_id) : null),
         metaAvailable: !!campaignMeta,
       },
       metaInsights,

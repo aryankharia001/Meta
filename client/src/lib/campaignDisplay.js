@@ -62,3 +62,27 @@ export function formatBudget(budget, budgetType) {
   if (budgetType === "lifetime") return `${amount} lifetime`;
   return amount;
 }
+
+// Phase 32 §2 — Bid Cap applicability, derived purely from Meta's own
+// bid_strategy value on the campaign/ad set. Only ever returns
+// "not_applicable" when Meta explicitly reports a bidding strategy that
+// is known not to use a manual bid cap ("Highest Volume" / lowest-cost-
+// without-cap) — never guessed from a missing/empty bid_strategy, which
+// just means Meta didn't return one ("unknown", rendered "N/A" by
+// callers, not "Not Applicable"). A genuine bidAmount from Meta always
+// takes priority over this classification wherever it's used — see
+// CurrentValuesCard.jsx.
+const BID_CAP_NOT_APPLICABLE_STRATEGIES = new Set(["LOWEST_COST_WITHOUT_CAP"]);
+const BID_CAP_APPLICABLE_STRATEGIES = new Set([
+  "LOWEST_COST_WITH_BID_CAP",
+  "COST_CAP",
+  "LOWEST_COST_WITH_MIN_ROAS",
+  "TARGET_COST",
+]);
+
+export function bidCapApplicability(bidStrategy) {
+  if (!bidStrategy) return "unknown";
+  if (BID_CAP_NOT_APPLICABLE_STRATEGIES.has(bidStrategy)) return "not_applicable";
+  if (BID_CAP_APPLICABLE_STRATEGIES.has(bidStrategy)) return "applicable";
+  return "unknown";
+}

@@ -39,14 +39,25 @@ export function StatusPill({ status, label }) {
 
 // Campaign's own Meta budget (daily or lifetime) — never derived from
 // spend. Shows a muted em dash when Meta didn't return a budget.
-export function BudgetCell({ budget, budgetType }) {
+//
+// Phase 36 §4 — Campaign Budget Fallback. When the campaign itself has no
+// budget (Advantage+/CBO-off campaigns using Ad Set-level budgets), the
+// server already substitutes the sum of that campaign's own Ad Set
+// budgets into `budget`/`budgetType` (see campaigns.js's /compare —
+// budgetSource: "adsets"). This never shows a separate top-level field —
+// just the same Budget value plus a small, subtle caption underneath so
+// it's clear the number is a sum, not a number Meta reported directly on
+// the campaign. A genuine campaign-level budget (budgetSource: "campaign")
+// renders exactly as before, with no caption at all.
+export function BudgetCell({ budget, budgetType, budgetSource }) {
   const display = formatBudget(budget, budgetType);
   if (!display) return <span className="budget-cell text-slate-300">—</span>;
   const [amount, ...rest] = display.split(" ");
   return (
-    <span className="budget-cell">
+    <div className="budget-cell">
       <strong>{amount}</strong> {rest.join(" ")}
-    </span>
+      {budgetSource === "adsets" && <div className="text-[10px] font-normal text-slate-400 mt-0.5">Ad Set Budget Applied</div>}
+    </div>
   );
 }
 

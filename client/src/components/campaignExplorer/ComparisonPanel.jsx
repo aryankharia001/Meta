@@ -1,6 +1,7 @@
 import { X, Download, GitCompareArrows } from "lucide-react";
 import { currency, number, percent, multiplier } from "../../lib/format";
 import { formatBudget, roasClass } from "../../lib/campaignDisplay";
+import { BudgetCell } from "../CampaignCells";
 
 // Phase 8 — Campaign Comparison. A focused, read-only side-by-side view
 // of whatever campaigns are currently selected in ExplorerTable —
@@ -116,7 +117,16 @@ export default function ComparisonPanel({ campaigns, onClose }) {
                         m.key === "roas" ? roasClass(c.roas) : isBest ? "font-semibold text-emerald-600" : "";
                       return (
                         <td key={c.campaignId} className={cellClass}>
-                          {m.format(c[m.key], c)}
+                          {/* Phase 36 §4 — "format" stays plain-text (CSV export
+                              reuses it above); the Budget row renders via
+                              BudgetCell here instead so the small "Ad Set
+                              Budget Applied" note can show, same pattern as
+                              ExplorerTable.jsx/LiveMonitoringSection.jsx. */}
+                          {m.key === "budget" ? (
+                            <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
+                          ) : (
+                            m.format(c[m.key], c)
+                          )}
                         </td>
                       );
                     })}

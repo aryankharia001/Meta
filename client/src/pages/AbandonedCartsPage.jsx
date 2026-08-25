@@ -4,7 +4,6 @@ import {
   ShoppingBag,
   Loader2,
   Pencil,
-  Trash2,
   Eye,
   AlertTriangle,
   X,
@@ -14,37 +13,45 @@ import {
   ChevronLeft,
   ChevronRight,
   Settings2,
-  ExternalLink,
   Download,
+  CheckCircle2,
 } from "lucide-react";
 import {
   fetchAbandonedCarts,
   fetchAbandonedCart,
-  updateAbandonedCart,
-  deleteAbandonedCart,
+  updateAbandonedCartNotes,
   fetchAbandonedCartSettings,
   updateAbandonedCartSettings,
+  startTrafleadSync,
+  fetchTrafleadSyncStatus,
 } from "../lib/api";
 import { currency as formatCurrency, number as formatNumber, formatDateTime } from "../lib/format";
 import { downloadCsv } from "../lib/csv";
+import {
+  BUCKET_STYLES,
+  matchMethodLabel,
+  MATCH_METHOD_STYLES,
+  shipmentStatusDisplay,
+  shipmentStatusBadgeTone,
+  effectiveMatchMethod,
+  isVerificationPending,
+} from "../lib/shipmentStatus";
 
 // ────────────────────────────────────────────────────────────────
-// Phase 25 — Store & Fetch Real Abandoned Cart Orders. Replaces Phase
-// 22's manual daily-total entry page. Every record here is a REAL
-// abandoned-cart order, written automatically by the
-// /abandon-cart-postback webhook (Traflead / Shiprocket Engage) into
-// MongoDB (see server/models/AbandonedCartOrder.js) — this page never
-// creates a record, it only searches/filters/views/edits/deletes what
-// the database already has (§6 — "the database records themselves
-// should determine the daily totals," §7 architecture diagram: Postback
-// -> MongoDB -> this page -> Dashboard).
+// Phase 33 — Exact Traflead Abandoned Cart Data Sync. Every record on
+// this page is an EXACT MIRROR of a real Lead in the separate trafleadcrm
+// project's "Abandoned Cart" offer (synced via
+// server/services/trafleadSyncService.js, upserted on Traflead's own
+// stable Lead ID — see server/models/TrafleadAbandonedCartLead.js).
+// This page never creates or deletes a record — only Traflead does that
+// — it searches/filters/views what's synced, and can add a purely
+// ops-local Note (the one field this app is allowed to write itself;
+// every other field would just be overwritten by the next sync).
 //
-// §5 — the delivery/success rate and the four per-order costs are now
-// GLOBAL settings (server/models/AbandonedCartSettings.js), edited in
-// the collapsible panel below, instead of one value typed per daily
-// record. The range summary (§4) is computed server-side in
-// routes/abandonedCarts.js's computeSummary() from those settings +
-// every matching order's own cart value — this page only displays it.
+// Status is shown EXACTLY as Traflead has it (processing/approved/
+// cancelled/hold/trash/confirmed), never renamed. Revenue recognition
+// (Settings panel) is now based on that real status (+ shipment
+// delivered, optionally) instead of a flat assumed delivery-rate %.
 // ────────────────────────────────────────────────────────────────
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -57,23 +64,27 @@ const shiftDays = (dateStr, days) => {
 
 const PAGE_SIZES = [10, 25, 50, 100];
 
+const STATUS_STYLES = {
+  confirmed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  approved: "bg-sky-50 text-sky-700 border-sky-200",
+  processing: "bg-amber-50 text-amber-700 border-amber-200",
+  hold: "bg-orange-50 text-orange-700 border-orange-200",
+  cancelled: "bg-slate-100 text-slate-500 border-slate-200",
+  trash: "bg-rose-50 text-rose-600 border-rose-200",
+};
+
+function StatusBadge({ status }) {
+  if (!status) return <span className="text-slate-300">—</span>;
+  const cls = STATUS_STYLES[String(status).toLowerCase()] || "bg-slate-100 text-slate-600 border-slate-200";
+  return <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-medium border ${cls}`}>{status}</span>;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Filters — quick presets + persistence across navigation.
-//
-// Quick presets (Today / Yesterday / 7 Days / 30 Days) apply and fetch
-// immediately when clicked. The custom date-range inputs, in contrast,
-// only stage a DRAFT value locally — nothing is fetched until "Apply"
-// is pressed, so typing/picking a date doesn't fire a request per
-// keystroke/click.
-//
-// Persistence: this page fully unmounts when the user navigates to a
-// different menu (React Router swaps the route), which would normally
-// reset all of this back to its defaults. To survive that, the current
-// filters/search/page are mirrored into sessionStorage on every change
-// and read back once on mount — so returning to this page (without a
-// full browser reload) picks up right where the user left off. An
-// explicit ?since=&until= deep link (e.g. from the Dashboard) still
-// takes priority over whatever was last persisted.
+// (Unchanged from Phase 25/28 — see original header comment for the
+// full rationale: presets fetch immediately, custom range stages a
+// draft until "Apply", and everything is mirrored into sessionStorage
+// so navigating away and back picks up where you left off.)
 // ────────────────────────────────────────────────────────────────
 const FILTERS_STORAGE_KEY = "abandonedCartsPage.filters.v1";
 
@@ -101,14 +112,6 @@ const PRESETS = [
   { key: "30d", label: "30 Days", range: () => [shiftDays(todayIso(), -29), todayIso()] },
 ];
 
-function productSummary(items) {
-  if (!items || items.length === 0) return { label: "—", title: "" };
-  const names = items.map((it) => it.name || it.sku || "Item").filter(Boolean);
-  const label = names.length > 1 ? `${names[0]} +${names.length - 1} more` : names[0];
-  const title = items.map((it) => `${it.name || it.sku || "Item"} × ${it.quantity || 1} (${formatCurrency(it.price)})`).join("\n");
-  return { label, title };
-}
-
 function SettingsPanel({ open, onClose }) {
   const [form, setForm] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -124,7 +127,6 @@ function SettingsPanel({ open, onClose }) {
       .then((res) => {
         if (cancelled) return;
         setForm({
-          deliveryRate: String(res.deliveryRate ?? 70),
           manufacturingCost: String(res.manufacturingCost ?? 0),
           packagingCost: String(res.packagingCost ?? 0),
           shippingCost: String(res.shippingCost ?? 0),
@@ -146,14 +148,12 @@ function SettingsPanel({ open, onClose }) {
     setError("");
     try {
       const res = await updateAbandonedCartSettings({
-        deliveryRate: Number(form.deliveryRate) || 0,
         manufacturingCost: Number(form.manufacturingCost) || 0,
         packagingCost: Number(form.packagingCost) || 0,
         shippingCost: Number(form.shippingCost) || 0,
         miscCost: Number(form.miscCost) || 0,
       });
       setForm({
-        deliveryRate: String(res.deliveryRate ?? 0),
         manufacturingCost: String(res.manufacturingCost ?? 0),
         packagingCost: String(res.packagingCost ?? 0),
         shippingCost: String(res.shippingCost ?? 0),
@@ -170,80 +170,71 @@ function SettingsPanel({ open, onClose }) {
   return (
     <div className="card flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <div className="font-display font-semibold text-sm text-slate-800">Abandoned Cart Settings</div>
+        <div className="font-display font-semibold text-sm text-slate-800">Abandoned Cart Expense Settings</div>
         <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
           <X size={15} />
         </button>
       </div>
       <p className="text-xs text-slate-400 -mt-1">
-        Applies to every abandoned cart, everywhere in the app (this page and the Dashboard). Expenses are scaled by Expected
-        Delivered Orders (Orders × Delivery Rate), not the raw order count.
+        Applies everywhere in the app (this page, Dashboard, Daily, Analytics, Profitability, Campaign Explorer). Revenue is
+        recognized purely from Traflead's real shipment status — a lead counts once its shipment status is exactly
+        "delivered," attributed to the date it was delivered, never an assumed percentage or a settings-configurable status
+        list. These per-unit costs are charged against every shipment that actually delivered in the selected range.
       </p>
       {loading || !form ? (
-        <div className="h-16 animate-pulse bg-slate-100 rounded-lg" />
+        <div className="h-20 animate-pulse bg-slate-100 rounded-lg" />
       ) : (
-        <form onSubmit={handleSave} className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-            Delivery Rate %
-            <input
-              type="number"
-              min="0"
-              max="100"
-              step="0.01"
-              className="input"
-              value={form.deliveryRate}
-              onChange={(e) => setForm((f) => ({ ...f, deliveryRate: e.target.value }))}
-              required
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
-            Manufacturing Cost / Order
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              className="input"
-              value={form.manufacturingCost}
-              onChange={(e) => setForm((f) => ({ ...f, manufacturingCost: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-            Packaging Cost / Order
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              className="input"
-              value={form.packagingCost}
-              onChange={(e) => setForm((f) => ({ ...f, packagingCost: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-            Shipping Cost / Order
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              className="input"
-              value={form.shippingCost}
-              onChange={(e) => setForm((f) => ({ ...f, shippingCost: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-            Misc Cost / Order
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              className="input"
-              value={form.miscCost}
-              onChange={(e) => setForm((f) => ({ ...f, miscCost: e.target.value }))}
-            />
-          </label>
-          <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
-            {saving ? <Loader2 size={13} className="animate-spin" /> : "Save"}
-          </button>
-          {savedAt && !saving && <span className="text-xs text-emerald-600">Saved</span>}
+        <form onSubmit={handleSave} className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
+              Manufacturing Cost / Delivered
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="input"
+                value={form.manufacturingCost}
+                onChange={(e) => setForm((f) => ({ ...f, manufacturingCost: e.target.value }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+              Packaging Cost / Delivered
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="input"
+                value={form.packagingCost}
+                onChange={(e) => setForm((f) => ({ ...f, packagingCost: e.target.value }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+              Shipping Cost / Delivered
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="input"
+                value={form.shippingCost}
+                onChange={(e) => setForm((f) => ({ ...f, shippingCost: e.target.value }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
+              Misc Cost / Delivered
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="input"
+                value={form.miscCost}
+                onChange={(e) => setForm((f) => ({ ...f, miscCost: e.target.value }))}
+              />
+            </label>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
+              {saving ? <Loader2 size={13} className="animate-spin" /> : "Save"}
+            </button>
+            {savedAt && !saving && <span className="text-xs text-emerald-600">Saved</span>}
+          </div>
         </form>
       )}
       {error && (
@@ -255,10 +246,8 @@ function SettingsPanel({ open, onClose }) {
   );
 }
 
-function AddressBlock({ address, pincode }) {
-  const parts = [address?.line1, address?.line2, address?.city, address?.state, pincode || address?.pincode, address?.country].filter(
-    Boolean
-  );
+function AddressBlock({ record }) {
+  const parts = [record.address, record.address2, record.city, record.state, record.pinCode, record.country].filter(Boolean);
   if (parts.length === 0) return <span className="text-slate-300">—</span>;
   return <span>{parts.join(", ")}</span>;
 }
@@ -282,9 +271,12 @@ function ViewDetailsModal({ id, onClose }) {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between">
-          <div className="font-display font-semibold text-sm text-slate-800">Abandoned cart details</div>
+          <div className="font-display font-semibold text-sm text-slate-800">Abandoned cart lead — from Traflead</div>
           <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
             <X size={15} />
           </button>
@@ -296,86 +288,79 @@ function ViewDetailsModal({ id, onClose }) {
         {record && !loading && (
           <div className="space-y-4 text-xs">
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2.5">
-              <Field label="Date / Time" value={formatDateTime(record.orderTimestamp)} />
-              <Field label="Source" value={record.source || "—"} />
-              <Field label="Payment Status" value={record.paymentStatus || "—"} />
-              <Field label="Cart ID" value={record.cartId || "—"} />
-              <Field label="Order ID" value={record.externalOrderId || "—"} />
-              <Field label="Abandoned Cart ID" value={record.abandonedCartId || "—"} />
-              <Field label="Customer" value={record.customerName || "—"} />
+              <Field label="Created (Traflead)" value={formatDateTime(record.trafleadCreatedAt)} />
+              <Field label="Updated (Traflead)" value={formatDateTime(record.trafleadUpdatedAt)} />
+              <Field label="Status" value={<StatusBadge status={record.status} />} raw />
+              {/* Phase 36 §1 — reads through the same shared helpers the
+                  main table uses (see lib/shipmentStatus.js) so this modal
+                  can never show a different status/match interpretation
+                  than the table row it was opened from. */}
+              <Field label="Shipment Status" value={shipmentStatusDisplay(record)} />
+              <Field
+                label="Matched Shipment"
+                value={
+                  <span
+                    className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                      isVerificationPending(record)
+                        ? "bg-blue-50 text-blue-600 border-blue-200"
+                        : record.matchedShipmentFound
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        : "bg-slate-100 text-slate-500 border-slate-200"
+                    }`}
+                  >
+                    {isVerificationPending(record) ? "Verifying…" : record.matchedShipmentFound ? "Found" : "Not Found"}
+                  </span>
+                }
+                raw
+              />
+              <Field label="Match status" value={matchMethodLabel(effectiveMatchMethod(record))} />
+              {!isVerificationPending(record) && (
+                <Field label="Last Verified" value={formatDateTime(record.shipmentLookupCheckedAt)} />
+              )}
+              <Field label="Matched Order ID" value={record.matchedOrderId || "—"} />
+              <Field label="Matched AWB" value={record.matchedAwbNumber || "—"} />
+              {record.matchedCandidateCount > 1 && (
+                <Field label="Candidates for this phone" value={`${record.matchedCandidateCount} shipped leads`} />
+              )}
+              <Field
+                label="Matched Delivered At"
+                value={record.matchedDeliveredAt ? formatDateTime(record.matchedDeliveredAt) : "—"}
+              />
+              <Field label="Order Date (Traflead)" value={record.orderDateIst || "—"} />
+              <Field label="Lead ID (Traflead)" value={record.trafleadLeadId || "—"} />
+              <Field label="Order ID" value={record.orderId || "—"} />
+              <Field label="External Order ID" value={record.externalOrderId || "—"} />
+              <Field label="Offer" value={record.offerName || "—"} />
+              <Field label="Customer" value={record.fullName || "—"} />
               <Field label="Phone" value={record.phone || "—"} />
               <Field label="Email" value={record.email || "—"} />
-              <Field label="Cart Value" value={formatCurrency(record.cartValue)} strong />
-              <Field label="Campaign" value={record.utmCampaign || "—"} />
-              <Field label="Adset" value={record.adsetName || "—"} />
-              <Field label="Ad" value={record.adId || "—"} />
-              <Field label="Pincode" value={record.pincode || "—"} />
+              <Field label="Product" value={record.productName || "—"} />
+              <Field label="Amount" value={formatCurrency(record.total)} strong />
+              <Field label="Payment Mode" value={record.paymentMode || "—"} />
+              <Field label="Campaign" value={record.campaign || "—"} />
+              <Field label="Medium" value={record.medium || "—"} />
+              <Field label="Webmaster" value={record.webmaster || "—"} />
+              <Field label="Affiliate ID" value={record.affiliateId || "—"} />
+              <Field label="Lead Source" value={record.leadSource || "—"} />
+              <Field label="Sub1" value={record.sub1 || "—"} />
+              <Field label="Sub2" value={record.sub2 || "—"} />
+              <Field label="Sub3" value={record.sub3 || "—"} />
+              <Field label="Sub4" value={record.sub4 || "—"} />
+              <Field label="Sub5" value={record.sub5 || "—"} />
               <div className="col-span-2 sm:col-span-3">
-                <div className="text-slate-400">Shipping Address</div>
+                <div className="text-slate-400">Address</div>
                 <div className="text-slate-700 mt-0.5">
-                  <AddressBlock address={record.shippingAddress} pincode={record.pincode} />
+                  <AddressBlock record={record} />
                 </div>
               </div>
-              {record.checkoutUrl && (
-                <div className="col-span-2 sm:col-span-3">
-                  <div className="text-slate-400">Checkout URL</div>
-                  <a
-                    href={record.checkoutUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-indigo-600 hover:underline inline-flex items-center gap-1 break-all"
-                  >
-                    {record.checkoutUrl} <ExternalLink size={11} className="shrink-0" />
-                  </a>
-                </div>
-              )}
-            </div>
-
-            <div>
-              <div className="text-slate-400 mb-1.5">Items</div>
-              {record.items && record.items.length > 0 ? (
-                <div className="border border-slate-100 rounded-lg overflow-hidden">
-                  <table className="w-full text-xs">
-                    <thead className="bg-slate-50 text-slate-500">
-                      <tr>
-                        <th className="text-left px-2.5 py-1.5 font-medium">Product</th>
-                        <th className="text-left px-2.5 py-1.5 font-medium">SKU</th>
-                        <th className="text-left px-2.5 py-1.5 font-medium">Variant</th>
-                        <th className="text-right px-2.5 py-1.5 font-medium">Qty</th>
-                        <th className="text-right px-2.5 py-1.5 font-medium">Price</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {record.items.map((it, i) => (
-                        <tr key={i} className="border-t border-slate-100">
-                          <td className="px-2.5 py-1.5">{it.name || "—"}</td>
-                          <td className="px-2.5 py-1.5">{it.sku || "—"}</td>
-                          <td className="px-2.5 py-1.5">{it.variantId || "—"}</td>
-                          <td className="px-2.5 py-1.5 text-right">{formatNumber(it.quantity)}</td>
-                          <td className="px-2.5 py-1.5 text-right">{formatCurrency(it.price)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <span className="text-slate-300">No line items recorded</span>
-              )}
             </div>
 
             {record.notes && (
               <div>
-                <div className="text-slate-400 mb-1">Notes</div>
+                <div className="text-slate-400 mb-1">Notes (ops-local, never synced to/from Traflead)</div>
                 <div className="text-slate-700">{record.notes}</div>
               </div>
             )}
-
-            <details className="text-xs">
-              <summary className="cursor-pointer text-slate-400 hover:text-slate-600">Raw postback payload</summary>
-              <pre className="mt-2 bg-slate-50 border border-slate-100 rounded-lg p-2.5 overflow-auto max-h-64 text-[10px] leading-relaxed">
-                {JSON.stringify(record.rawPayload || {}, null, 2)}
-              </pre>
-            </details>
           </div>
         )}
       </div>
@@ -383,187 +368,70 @@ function ViewDetailsModal({ id, onClose }) {
   );
 }
 
-function Field({ label, value, strong }) {
+function Field({ label, value, strong, raw }) {
   return (
     <div className="min-w-0">
       <div className="text-slate-400">{label}</div>
-      <div className={`truncate ${strong ? "font-semibold text-slate-800" : "text-slate-700"}`}>{value}</div>
+      {raw ? (
+        <div className="mt-0.5">{value}</div>
+      ) : (
+        <div className={`truncate ${strong ? "font-semibold text-slate-800" : "text-slate-700"}`}>{value}</div>
+      )}
     </div>
   );
 }
 
-function EditAbandonedCartModal({ id, onClose, onSaved }) {
-  const [form, setForm] = useState(null);
-  const [loading, setLoading] = useState(true);
+// Every field on a synced lead comes from Traflead and would just be
+// overwritten by the next sync — this app is only allowed to write its
+// own `notes` field, so editing is a single textarea, not a full form.
+function EditNotesModal({ record, onClose, onSaved }) {
+  const [notes, setNotes] = useState(record.notes || "");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchAbandonedCart(id)
-      .then((res) => {
-        if (cancelled) return;
-        const r = res.record;
-        setForm({
-          customerName: r.customerName || "",
-          phone: r.phone || "",
-          email: r.email || "",
-          cartValue: r.cartValue ?? "",
-          paymentStatus: r.paymentStatus || "",
-          utmCampaign: r.utmCampaign || "",
-          adsetName: r.adsetName || "",
-          adId: r.adId || "",
-          checkoutUrl: r.checkoutUrl || "",
-          line1: r.shippingAddress?.line1 || "",
-          line2: r.shippingAddress?.line2 || "",
-          city: r.shippingAddress?.city || "",
-          state: r.shippingAddress?.state || "",
-          pincode: r.pincode || r.shippingAddress?.pincode || "",
-          country: r.shippingAddress?.country || "",
-          notes: r.notes || "",
-        });
-      })
-      .catch((err) => !cancelled && setError(err.message || "Failed to load record"))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
-
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (submitting || !form) return;
+    if (submitting) return;
     setError("");
     setSubmitting(true);
     try {
-      const res = await updateAbandonedCart(id, {
-        customerName: form.customerName,
-        phone: form.phone,
-        email: form.email,
-        cartValue: Number(form.cartValue) || 0,
-        paymentStatus: form.paymentStatus,
-        utmCampaign: form.utmCampaign,
-        adsetName: form.adsetName,
-        adId: form.adId,
-        checkoutUrl: form.checkoutUrl,
-        shippingAddress: {
-          line1: form.line1,
-          line2: form.line2,
-          city: form.city,
-          state: form.state,
-          pincode: form.pincode,
-          country: form.country,
-        },
-        notes: form.notes,
-      });
+      const res = await updateAbandonedCartNotes(record.id, notes);
       onSaved(res.record);
     } catch (err) {
-      setError(err.message || "Failed to update abandoned cart record");
+      setError(err.message || "Failed to save note");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
-
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
       <form
         onSubmit={handleSubmit}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-3"
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <div className="font-display font-semibold text-sm text-slate-800">Edit abandoned cart record</div>
+          <div className="font-display font-semibold text-sm text-slate-800">Note — {record.fullName || record.phone || record.orderId}</div>
           <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
             <X size={15} />
           </button>
         </div>
-
-        {loading || !form ? (
-          <div className="h-40 animate-pulse bg-slate-100 rounded-lg" />
-        ) : (
-          <>
-            <div className="flex flex-wrap gap-3">
-              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
-                Customer Name
-                <input className="input" value={form.customerName} onChange={set("customerName")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-40">
-                Phone
-                <input className="input" value={form.phone} onChange={set("phone")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[180px]">
-                Email
-                <input className="input" value={form.email} onChange={set("email")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-                Cart Value
-                <input type="number" min="0" step="0.01" className="input" value={form.cartValue} onChange={set("cartValue")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
-                Payment Status
-                <input className="input" value={form.paymentStatus} onChange={set("paymentStatus")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-36">
-                Campaign
-                <input className="input" value={form.utmCampaign} onChange={set("utmCampaign")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-                Adset
-                <input className="input" value={form.adsetName} onChange={set("adsetName")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-28">
-                Ad
-                <input className="input" value={form.adId} onChange={set("adId")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[200px]">
-                Checkout URL
-                <input className="input" value={form.checkoutUrl} onChange={set("checkoutUrl")} />
-              </label>
-            </div>
-
-            <div className="text-xs text-slate-400 pt-1">Shipping Address</div>
-            <div className="flex flex-wrap gap-3">
-              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
-                Address Line 1
-                <input className="input" value={form.line1} onChange={set("line1")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 flex-1 min-w-[160px]">
-                Address Line 2
-                <input className="input" value={form.line2} onChange={set("line2")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-                City
-                <input className="input" value={form.city} onChange={set("city")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-32">
-                State
-                <input className="input" value={form.state} onChange={set("state")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-28">
-                Pincode
-                <input className="input" value={form.pincode} onChange={set("pincode")} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-500 w-28">
-                Country
-                <input className="input" value={form.country} onChange={set("country")} />
-              </label>
-            </div>
-
-            <label className="flex flex-col gap-1 text-xs text-slate-500">
-              Notes
-              <input className="input" value={form.notes} onChange={set("notes")} placeholder="Optional" />
-            </label>
-          </>
-        )}
-
+        <p className="text-xs text-slate-400">
+          Every other field on this lead is synced from Traflead and read-only here. Notes are ops-local only.
+        </p>
+        <textarea
+          className="input w-full min-h-[100px]"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Optional"
+        />
         {error && <div className="text-xs text-rose-600">{error}</div>}
         <div className="flex justify-end gap-2">
           <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn btn-primary btn-sm" disabled={submitting || loading}>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={submitting}>
             {submitting ? <Loader2 size={13} className="animate-spin" /> : "Save"}
           </button>
         </div>
@@ -572,25 +440,91 @@ function EditAbandonedCartModal({ id, onClose, onSaved }) {
   );
 }
 
+// Compact "synced from Traflead" indicator — polls /traflead-sync/status
+// while a sync is running (either the background catch-up GET / kicked
+// off, or a manual force-refresh) and stops once it's done.
+function SyncStatusBar({ since, until, onSyncComplete }) {
+  const [status, setStatus] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const pollRef = useRef(null);
+
+  const poll = () => {
+    fetchTrafleadSyncStatus({ since, until })
+      .then((res) => {
+        setStatus(res.data);
+        const running = res.data?.backfill?.running;
+        if (running) {
+          pollRef.current = setTimeout(poll, 2500);
+        } else {
+          setRefreshing(false);
+          onSyncComplete?.();
+        }
+      })
+      .catch(() => {
+        setRefreshing(false);
+      });
+  };
+
+  useEffect(() => {
+    poll();
+    return () => clearTimeout(pollRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [since, until]);
+
+  const handleForceSync = async () => {
+    setRefreshing(true);
+    try {
+      await startTrafleadSync({ since, until, force: true });
+      poll();
+    } catch {
+      setRefreshing(false);
+    }
+  };
+
+  const backfill = status?.backfill;
+  const running = backfill?.running;
+  const failed = status?.summary?.failed || 0;
+
+  return (
+    <div className="flex items-center gap-2 text-xs text-slate-500">
+      {running ? (
+        <>
+          <Loader2 size={12} className="animate-spin text-indigo-500" />
+          Syncing from Traflead — day {backfill.daysDone}/{backfill.daysTotal}
+          {backfill.currentDay ? ` (${backfill.currentDay})` : ""}
+        </>
+      ) : failed > 0 ? (
+        <>
+          <AlertTriangle size={12} className="text-rose-500" />
+          {failed} day{failed === 1 ? "" : "s"} failed to sync from Traflead
+        </>
+      ) : (
+        <>
+          <CheckCircle2 size={12} className="text-emerald-500" />
+          Synced from Traflead
+        </>
+      )}
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm !py-1 !text-[11px]"
+        onClick={handleForceSync}
+        disabled={refreshing || running}
+      >
+        {refreshing || running ? "Syncing…" : "Sync now"}
+      </button>
+    </div>
+  );
+}
+
 export default function AbandonedCartsPage() {
   // Phase 28 §6 — "Abandoned Cart Revenue → opens the abandoned-cart
-  // orders for that date range." Dashboard's Gross Profit breakdown links
-  // here as /abandoned-carts?since=&until=, so this page seeds its own
-  // since/until state from those query params when present (read once, on
-  // mount, via useState's lazy initializer — never re-synced afterwards,
-  // so the page's own date controls remain the single source of truth for
-  // this page from that point on, exactly like every other filter here).
-  // Falls back to the default (today) when the page is opened directly.
+  // orders for that date range." Dashboard's breakdown links here as
+  // /abandoned-carts?since=&until=, so this page seeds its own
+  // since/until state from those query params when present.
   const [searchParams] = useSearchParams();
-  // Read once, on mount: a deep link (?since=&until=) wins over whatever
-  // was last persisted for this page, which in turn wins over the
-  // hard-coded "today" default.
   const [persisted] = useState(() => loadPersistedFilters());
   const [since, setSince] = useState(() => searchParams.get("since") || persisted?.since || todayIso());
   const [until, setUntil] = useState(() => searchParams.get("until") || persisted?.until || todayIso());
-  // Draft values for the custom date-range inputs — only committed to
-  // since/until (which is what actually triggers a fetch) when "Apply"
-  // is pressed.
   const [sinceDraft, setSinceDraft] = useState(since);
   const [untilDraft, setUntilDraft] = useState(until);
   const [searchInput, setSearchInput] = useState(() => persisted?.searchInput || "");
@@ -621,8 +555,6 @@ export default function AbandonedCartsPage() {
     setUntil(untilDraft);
   };
 
-  // Persist filters/search/page so they survive navigating away to
-  // another menu and back (see header comment on FILTERS_STORAGE_KEY).
   useEffect(() => {
     savePersistedFilters({ since, until, searchInput, search, page, pageSize });
   }, [since, until, searchInput, search, page, pageSize]);
@@ -634,15 +566,10 @@ export default function AbandonedCartsPage() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [viewId, setViewId] = useState(null);
-  const [editId, setEditId] = useState(null);
-  const [busyId, setBusyId] = useState(null);
+  const [editRecord, setEditRecord] = useState(null);
   const [actionError, setActionError] = useState("");
   const [exporting, setExporting] = useState(false);
 
-  // §3/§9 — debounce the search box so every keystroke doesn't fire a
-  // network request. Skipped on the very first run so restoring a
-  // persisted `searchInput`/`page` on mount doesn't immediately reset
-  // the page back to 1.
   const isFirstSearchRun = useRef(true);
   useEffect(() => {
     if (isFirstSearchRun.current) {
@@ -656,8 +583,6 @@ export default function AbandonedCartsPage() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  // Same reasoning — don't clobber a restored `page` the instant this
-  // page mounts with its restored since/until/pageSize.
   const isFirstRangeRun = useRef(true);
   useEffect(() => {
     if (isFirstRangeRun.current) {
@@ -687,24 +612,8 @@ export default function AbandonedCartsPage() {
   const totalPages = data?.totalPages || 1;
   const total = data?.total ?? 0;
 
-  const handleDelete = async (r) => {
-    if (!window.confirm(`Delete the abandoned cart record for ${r.customerName || r.phone || r.cartId || "this cart"}? This can't be undone.`)) return;
-    setBusyId(r.id);
-    setActionError("");
-    try {
-      await deleteAbandonedCart(r.id);
-      load(true);
-    } catch (err) {
-      setActionError(err.message || "Failed to delete abandoned cart record");
-    } finally {
-      setBusyId(null);
-    }
-  };
-
   // Export — a CSV of every record matching the CURRENT since/until/
-  // search filters (not just the page on screen), opens directly in
-  // Excel. Walks every page at the server's max page size rather than
-  // relying on whatever `pageSize` the table is currently set to.
+  // search filters (not just the page on screen).
   const handleExport = async () => {
     if (exporting) return;
     setExporting(true);
@@ -722,38 +631,56 @@ export default function AbandonedCartsPage() {
 
       const rows = [
         [
-          "Date / Time",
+          "Created (Traflead)",
+          "Updated (Traflead)",
+          "Lead ID (Traflead)",
+          "Order ID",
+          "External Order ID",
           "Customer",
           "Phone",
           "Email",
-          "Cart ID",
-          "Order ID",
-          "Abandoned Cart ID",
           "Product",
           "Amount",
+          "Status",
+          "Shipment Status",
+          "Matched Shipment",
+          "Match status",
+          "Matched Order ID",
           "Campaign",
-          "Adset",
-          "Ad",
-          "Payment Status",
-          "Pincode",
-          "Checkout URL",
+          "Medium",
+          "Webmaster",
+          "Affiliate ID",
+          "Sub1",
+          "Sub2",
+          "Sub3",
+          "Sub4",
+          "Sub5",
         ],
         ...all.map((r) => [
-          formatDateTime(r.orderTimestamp),
-          r.customerName || "",
+          formatDateTime(r.trafleadCreatedAt),
+          formatDateTime(r.trafleadUpdatedAt),
+          r.trafleadLeadId || "",
+          r.orderId || "",
+          r.externalOrderId || "",
+          r.fullName || "",
           r.phone || "",
           r.email || "",
-          r.cartId || "",
-          r.externalOrderId || "",
-          r.abandonedCartId || "",
-          productSummary(r.items).label,
-          r.cartValue ?? 0,
-          r.utmCampaign || "",
-          r.adsetName || "",
-          r.adId || "",
-          r.paymentStatus || "",
-          r.pincode || "",
-          r.checkoutUrl || "",
+          r.productName || "",
+          r.total ?? 0,
+          r.status || "",
+          shipmentStatusDisplay(r),
+          isVerificationPending(r) ? "Verifying" : r.matchedShipmentFound ? "Found" : "Not Found",
+          matchMethodLabel(effectiveMatchMethod(r)),
+          r.matchedOrderId || "",
+          r.campaign || "",
+          r.medium || "",
+          r.webmaster || "",
+          r.affiliateId || "",
+          r.sub1 || "",
+          r.sub2 || "",
+          r.sub3 || "",
+          r.sub4 || "",
+          r.sub5 || "",
         ]),
       ];
       downloadCsv(`abandoned-carts-${since}-to-${until}.csv`, rows);
@@ -776,9 +703,13 @@ export default function AbandonedCartsPage() {
             <p className="text-xs text-slate-400">
               {loading || !summary
                 ? "Loading…"
-                : `${formatNumber(summary.orders)} abandoned cart${summary.orders === 1 ? "" : "s"} in range · Potential ${formatCurrency(
-                    summary.potentialRevenue
-                  )} · Recognized ${formatCurrency(summary.recognizedRevenue)} · Net ${formatCurrency(summary.netContribution)}`}
+                : `${formatNumber(summary.orders)} abandoned cart lead${summary.orders === 1 ? "" : "s"} in range (synced from Traflead) · Matched ${formatNumber(
+                    summary.matched
+                  )} · Potential ${formatCurrency(summary.potentialRevenue)} · Confirmed Revenue ${formatCurrency(
+                    summary.confirmedRevenue ?? summary.deliveredRevenue
+                  )} (${formatNumber(summary.deliveredCount)} delivered) · Profit ${formatCurrency(summary.profit)}${
+                    summary.pendingVerification > 0 ? ` · ${formatNumber(summary.pendingVerification)} awaiting verification` : ""
+                  }`}
             </p>
           </div>
         </div>
@@ -795,6 +726,8 @@ export default function AbandonedCartsPage() {
         </div>
       </div>
 
+      <SyncStatusBar since={since} until={until} onSyncComplete={() => load(true)} />
+
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {(actionError || error) && (
@@ -808,7 +741,7 @@ export default function AbandonedCartsPage() {
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             className="input pl-7 !py-1.5 !text-xs"
-            placeholder="Search customer, phone, email, cart ID, campaign…"
+            placeholder="Search customer, phone, email, order ID, campaign, status…"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
           />
@@ -868,7 +801,7 @@ export default function AbandonedCartsPage() {
             <table className="table" style={{ tableLayout: "fixed", width: "max-content", minWidth: "100%" }}>
               <thead>
                 <tr>
-                  {["Date / Time", "Customer", "Cart ID", "Product", "Amount", "Campaign", "Adset", "Ad", ""].map((h) => (
+                  {["Created (Traflead)", "Order ID", "Customer", "Amount", "Status", "Shipment", "Match", "Campaign", ""].map((h) => (
                     <th key={h} className="sticky top-0 z-[2] bg-slate-50 text-left">
                       {h}
                     </th>
@@ -879,47 +812,49 @@ export default function AbandonedCartsPage() {
                 {records.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="text-center py-10 text-slate-400 text-sm">
-                      No abandoned cart records for this range/search.
+                      No abandoned cart leads for this range/search.
                     </td>
                   </tr>
                 ) : (
-                  records.map((r) => {
-                    const product = productSummary(r.items);
-                    return (
-                      <tr key={r.id} className="cursor-pointer" onClick={() => setViewId(r.id)}>
-                        <td className="font-medium text-slate-700 whitespace-nowrap">{formatDateTime(r.orderTimestamp)}</td>
-                        <td>
-                          <div className="text-slate-700">{r.customerName || "—"}</div>
-                          {(r.phone || r.email) && <div className="text-slate-400 text-[11px]">{r.phone || r.email}</div>}
-                        </td>
-                        <td className="text-slate-600">{r.cartId || r.externalOrderId || r.abandonedCartId || "—"}</td>
-                        <td title={product.title}>{product.label}</td>
-                        <td className="font-medium">{formatCurrency(r.cartValue)}</td>
-                        <td className="text-slate-600">{r.utmCampaign || "—"}</td>
-                        <td className="text-slate-600">{r.adsetName || "—"}</td>
-                        <td className="text-slate-600">{r.adId || "—"}</td>
-                        <td onClick={(ev) => ev.stopPropagation()}>
-                          <div className="flex items-center gap-1.5">
-                            <button type="button" className="text-slate-400 hover:text-indigo-600" title="View details" onClick={() => setViewId(r.id)}>
-                              <Eye size={14} />
-                            </button>
-                            <button type="button" className="text-slate-400 hover:text-indigo-600" title="Edit" disabled={busyId === r.id} onClick={() => setEditId(r.id)}>
-                              <Pencil size={14} />
-                            </button>
-                            <button
-                              type="button"
-                              className="text-slate-400 hover:text-rose-600 disabled:opacity-40"
-                              title="Delete"
-                              disabled={busyId === r.id}
-                              onClick={() => handleDelete(r)}
-                            >
-                              {busyId === r.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
+                  records.map((r) => (
+                    <tr key={r.id} className="cursor-pointer" onClick={() => setViewId(r.id)}>
+                      <td className="font-medium text-slate-700 whitespace-nowrap">{formatDateTime(r.trafleadCreatedAt)}</td>
+                      <td className="text-slate-600">{r.orderId || r.externalOrderId || r.trafleadLeadId || "—"}</td>
+                      <td>
+                        <div className="text-slate-700">{r.fullName || "—"}</div>
+                        {(r.phone || r.email) && <div className="text-slate-400 text-[11px]">{r.phone || r.email}</div>}
+                      </td>
+                      <td className="font-medium">{formatCurrency(r.total)}</td>
+                      <td>
+                        <StatusBadge status={r.status} />
+                      </td>
+                      <td>
+                        <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-medium border ${BUCKET_STYLES[shipmentStatusBadgeTone(r)]}`}>
+                          {shipmentStatusDisplay(r)}
+                        </span>
+                      </td>
+                      <td>
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-medium border whitespace-nowrap ${
+                            MATCH_METHOD_STYLES[effectiveMatchMethod(r)] || MATCH_METHOD_STYLES.not_found
+                          }`}
+                        >
+                          {matchMethodLabel(effectiveMatchMethod(r))}
+                        </span>
+                      </td>
+                      <td className="text-slate-600">{r.campaign || "—"}</td>
+                      <td onClick={(ev) => ev.stopPropagation()}>
+                        <div className="flex items-center gap-1.5">
+                          <button type="button" className="text-slate-400 hover:text-indigo-600" title="View details" onClick={() => setViewId(r.id)}>
+                            <Eye size={14} />
+                          </button>
+                          <button type="button" className="text-slate-400 hover:text-indigo-600" title="Edit note" onClick={() => setEditRecord(r)}>
+                            <Pencil size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
@@ -951,12 +886,12 @@ export default function AbandonedCartsPage() {
       )}
 
       {viewId && <ViewDetailsModal id={viewId} onClose={() => setViewId(null)} />}
-      {editId && (
-        <EditAbandonedCartModal
-          id={editId}
-          onClose={() => setEditId(null)}
+      {editRecord && (
+        <EditNotesModal
+          record={editRecord}
+          onClose={() => setEditRecord(null)}
           onSaved={() => {
-            setEditId(null);
+            setEditRecord(null);
             load(true);
           }}
         />

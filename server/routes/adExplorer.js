@@ -55,6 +55,14 @@ const AD_FIELDS = [
   "id", "name", "adset_id", "adset{id,name}", "campaign_id", "campaign{id,name}",
   "status", "effective_status", "created_time", "updated_time",
   "creative{id,thumbnail_url}",
+  // Phase 32 §4 — account_id, straight from Meta on the ad node itself
+  // (no extra request). Exposed in /:adId/details below as ad.accountId
+  // so AdDrawer.jsx can build a real "Open in Meta Ads Manager" deep
+  // link (act=<accountId>) without guessing. Ads have no editable
+  // budget/bid_amount/bid_strategy of their own in the Graph API (those
+  // live on the Campaign/Ad Set only) — see AdDrawer.jsx's Budget & Bid
+  // Cap section, which shows "Not Applicable" rather than fabricating one.
+  "account_id",
 ].join(",");
 
 const AD_INSIGHT_FIELDS = [
@@ -459,6 +467,10 @@ router.get("/:tokenId/:adId/details", async (req, res) => {
             thumbnailUrl: meta.creative?.thumbnail_url || null,
             createdTime: meta.created_time || null,
             updatedTime: meta.updated_time || null,
+            // Phase 32 §4 — ad account ID, straight from Meta. Powers the
+            // "Open in Meta Ads Manager" deep link; null (never guessed)
+            // when Meta didn't return it.
+            accountId: meta.account_id ? String(meta.account_id) : null,
           }
         : { adId, adName: "Unavailable", metaAvailable: false },
       metaInsights: insights

@@ -661,46 +661,100 @@ export async function fetchExpenseBreakdown({ since, until } = {}) {
   return data; // { success, since, until, expenses, total }
 }
 
-// ─── Abandoned Carts (Phase 22, reworked in Phase 25) ──────────────
+// ─── Abandoned Carts (Phase 22, reworked in Phase 25, reworked again in
+// Phase 33, revenue source reworked again in Phase 34) ─────────────────
 // Routes at /api/abandoned-carts. Genuinely DB-backed (Mongo), never
 // localStorage — see AbandonedCartsPage.jsx and Dashboard.jsx's
-// Abandoned Cart section. As of Phase 25, records are REAL individual
-// abandoned-cart orders (written automatically by the
-// /abandon-cart-postback webhook — see server/routes/abandonCartPostback.js),
-// not manually-entered daily totals; there is no more createAbandonedCart.
+// Abandoned Cart section.
+//
+// As of Phase 33, records are an EXACT MIRROR of Traflead's own
+// "Abandoned Cart" offer leads (synced from the separate trafleadcrm
+// project's own API — see server/services/trafleadSyncService.js), kept
+// fresh via server/routes/trafleadSync.js. There is no more
+// createAbandonedCart, and updateAbandonedCart (now
+// updateAbandonedCartNotes) only accepts `{ notes }` — every other
+// field is sourced from Traflead and would be silently overwritten on
+// the next sync, so the backend rejects edits to anything else.
+// deleteAbandonedCart is gone entirely (same reason — Traflead is the
+// source of truth, a synced record can't be "deleted" locally, it would
+// just come back on the next sync).
+//
+// Phase 34 — revenue was shipment-delivered-date based.
+//
+// Phase 35 — revenue source changed AGAIN: now phone-matched-shipment-
+// status based, attributed to the SELECTED date range (never a delivery
+// date) — see trafleadSyncService.js's Phase 35 header comment and
+// computeAbandonedCartSummary. fetchAbandonedCarts's `summary` now has
+// orders/matched/unmatched/deliveredCount/notDeliveredMatched/
+// potentialRevenue/deliveredRevenue/profit — expectedDelivered/
+// recognizedRevenue/netContribution/deliveryRate are kept as aliases of
+// deliveredCount/deliveredRevenue/profit/(deliveredCount÷orders) for any
+// old reader. The response also still includes `deliveredLeads`
+// (shipment-matched-and-delivered rows for the Delivered Revenue
+// drill-down) and `deliveredLeadsTruncated`. Each record now also
+// carries matchedShipmentFound/matchedShipmentStatus/matchedOrderId/
+// matchedAwbNumber/matchMethod/matchedCandidateCount/
+// shipmentLookupCheckedAt (the phone-match result) alongside the
+// untouched shipmentStatus/deliveredDateIst fields (that SAME lead's own
+// embedded shipment sub-doc, from Phase 34 — no longer what drives
+// revenue, but still synced and available for reference).
 //
 // fetchAbandonedCarts accepts { since, until, search, page, pageSize }
-// (all optional, since/until are plain YYYY-MM-DD strings). Dashboard
-// calls it with just { since, until } and only ever reads `res.summary`
-// — that response shape/keys are unchanged from Phase 22, so Dashboard
-// needed no changes for this rework. The Management page additionally
-// uses search/page/pageSize and reads `res.records`/`res.total`/
-// `res.totalPages` for its server-side-paginated table.
+// (all optional except since/until, plain YYYY-MM-DD strings). The
+// Management page additionally uses search/page/pageSize and reads
+// `res.records`/`res.total`/`res.totalPages`/`res.sync` for its
+// server-side-paginated table.
 export async function fetchAbandonedCarts(params = {}) {
   const { data } = await api.get("/abandoned-carts", { params });
-  return data; // { success, records, total, page, pageSize, totalPages, summary }
+  return data; // { success, records, total, page, pageSize, totalPages, summary, deliveredLeads, deliveredLeadsTruncated, sync }
 }
 export async function fetchAbandonedCart(id) {
   const { data } = await api.get(`/abandoned-carts/${id}`);
   return data; // { success, record }
 }
-export async function updateAbandonedCart(id, payload) {
-  const { data } = await api.put(`/abandoned-carts/${id}`, payload);
+// Phase 34 — per-IST-day { date, leads, delivered, deliveredRevenue }
+// for the Daily tab's Abandoned Cart table.
+export async function fetchAbandonedCartsDaily({ since, until }) {
+  const { data } = await api.get("/abandoned-carts/daily", { params: { since, until } });
+  return data; // { success, days, sync }
+}
+// Phase 33 — payload must be { notes }. Every other field is
+// Traflead-sourced and read-only from this app's point of view.
+export async function updateAbandonedCartNotes(id, notes) {
+  const { data } = await api.put(`/abandoned-carts/${id}`, { notes });
   return data; // { success, record }
 }
-export async function deleteAbandonedCart(id) {
-  const { data } = await api.delete(`/abandoned-carts/${id}`);
-  return data; // { success }
-}
-// §5 — global delivery rate + per-order cost settings (replaces the old
-// per-record deliveryRate/*Cost fields).
+// Phase 34 — per-delivered-unit cost settings only (recognizedLeadStatuses
+// / requireShipmentDelivered are retired — revenue is purely
+// shipment.status === "delivered" now, not settings-configurable).
 export async function fetchAbandonedCartSettings() {
   const { data } = await api.get("/abandoned-carts/settings");
-  return data; // { success, deliveryRate, manufacturingCost, packagingCost, shippingCost, miscCost }
+  return data; // { success, manufacturingCost, packagingCost, shippingCost, miscCost }
 }
 export async function updateAbandonedCartSettings(payload) {
   const { data } = await api.put("/abandoned-carts/settings", payload);
-  return data; // { success, deliveryRate, manufacturingCost, packagingCost, shippingCost, miscCost }
+  return data; // { success, manufacturingCost, packagingCost, shippingCost, miscCost }
+}
+
+// ─── Traflead Abandoned Cart Sync (Phase 33) ───────────────────────
+// Routes at /api/traflead-sync. Mirrors the Shiprocket sync
+// start/cancel/status shape exactly — see ShiprocketSyncContext.jsx for
+// the pattern this is meant to be polled the same way.
+export async function startTrafleadSync({ since, until, force = false }) {
+  const { data } = await api.post("/traflead-sync/start", { since, until, force });
+  return data; // { success, message }
+}
+export async function cancelTrafleadSync() {
+  const { data } = await api.post("/traflead-sync/cancel");
+  return data; // { success, message }
+}
+export async function fetchTrafleadSyncStatus({ since, until }) {
+  const { data } = await api.get("/traflead-sync/status", { params: { since, until } });
+  return data; // { success, data: { checklist, summary, backfill } }
+}
+export async function fetchTrafleadOffers() {
+  const { data } = await api.get("/traflead-sync/offers");
+  return data; // { success, offers: [{ offerId, offerName }] } — diagnostic only
 }
 
 // ─── Profitability (Phase 16) ──────────────────────────────────────

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw, Wallet, Gauge, TrendingUp } from "lucide-react";
 import { fetchCampaignCurrent, fetchAdSetCurrent, syncEntityNow } from "../../lib/api";
-import { formatBudget } from "../../lib/campaignDisplay";
+import { formatBudget, bidCapApplicability } from "../../lib/campaignDisplay";
 import { currency, formatDateTime } from "../../lib/format";
 
 // Phase 27 §1/§11 — "Current Values" block for the Budget & Bid Cap
@@ -72,17 +72,46 @@ export default function CurrentValuesCard({ level, tokenId, entityId, onEditBudg
             <div className="flex items-center gap-2 text-xs text-slate-400 mb-1">
               <Gauge size={14} /> Current Bid Cap
             </div>
+            {/* Phase 32 §2 — Bid Cap is a real Meta value everywhere it can
+                be one: a genuine current.bidAmount always wins (shown as
+                currency, never a fake ₹0); failing that, "Not Applicable"
+                only when Meta's own bid_strategy says this bidding
+                strategy doesn't use a manual cap (bidCapApplicability());
+                otherwise "Not set" (a cap could apply here, none is
+                configured) with the existing Edit affordance. Campaigns
+                never show a numeric bid cap at all — Meta's Graph API has
+                no editable bid_amount on the Campaign object, only on Ad
+                Sets — so that case is unconditionally "Not Applicable". */}
             {level === "adset" ? (
-              <>
-                <div className="text-lg font-semibold text-slate-800">
-                  {current.bidAmount !== null && current.bidAmount !== undefined ? currency(current.bidAmount) : "Not set"}
-                </div>
-                <button type="button" className="text-xs text-indigo-600 hover:underline mt-1" onClick={() => onEditBidCap?.(current)}>
-                  Edit
-                </button>
-              </>
+              current.bidAmount !== null && current.bidAmount !== undefined ? (
+                <>
+                  <div className="text-lg font-semibold text-slate-800">{currency(current.bidAmount)}</div>
+                  <button type="button" className="text-xs text-indigo-600 hover:underline mt-1" onClick={() => onEditBidCap?.(current)}>
+                    Edit
+                  </button>
+                </>
+              ) : bidCapApplicability(current.bidStrategy) === "not_applicable" ? (
+                <>
+                  <div className="text-base font-semibold text-slate-500">Not Applicable</div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Bid strategy "{current.bidStrategy}" doesn't use a manual bid cap.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-lg font-semibold text-slate-800">Not set</div>
+                  <button type="button" className="text-xs text-indigo-600 hover:underline mt-1" onClick={() => onEditBidCap?.(current)}>
+                    Edit
+                  </button>
+                </>
+              )
             ) : (
-              <div className="text-sm text-slate-500">Set at Ad Set level — open an ad set to edit its bid cap.</div>
+              <>
+                <div className="text-base font-semibold text-slate-500">Not Applicable</div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  Bid Cap is set per Ad Set in Meta, not at the Campaign level — open an ad set below to view or edit it.
+                </div>
+              </>
             )}
           </div>
 

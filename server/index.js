@@ -58,6 +58,13 @@ import { bootstrapAdminFromEnv } from "./lib/bootstrapAdmin.js";
 import { connectDB } from "./config/db.js";
 import startShiprocketAutoSync from "./services/shiprocketCron.js";
 import orderCostsRouter from "./routes/orderCosts.js";
+// Phase 33 — Exact Traflead Abandoned Cart Data Sync. Entirely new,
+// additive route file + sync cron; nothing above is modified. Pulls
+// real Lead data from the separate trafleadcrm project's own API (never
+// writes back to Traflead, never touches Meta<->Shiprocket sync,
+// campaign/order matching, or profitability logic).
+import trafleadSyncRouter from "./routes/trafleadSync.js";
+import startTrafleadSyncCron from "./services/trafleadSyncCron.js";
 
 dotenv.config();
 
@@ -161,6 +168,8 @@ app.use("/api/abandoned-carts", abandonedCartsRouter);
 // touched or imported except read-only Token/AdAccount lookups.
 app.use("/api/campaign-control", campaignControlRouter);
 app.use("/api/adset-control", adsetControlRouter);
+// Phase 33 — additive only, alongside every route above.
+app.use("/api/traflead-sync", trafleadSyncRouter);
 
 /* =========================================================
    SERVE REACT CLIENT
@@ -197,6 +206,7 @@ const start = async () => {
 
     startShiprocketAutoSync();
     startMetaEntitySyncCron();
+    startTrafleadSyncCron();
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);

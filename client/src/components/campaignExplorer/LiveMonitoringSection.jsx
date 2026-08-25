@@ -320,7 +320,7 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
                   if (col.key === "budget") {
                     return (
                       <td key={col.key}>
-                        <BudgetCell budget={c.budget} budgetType={c.budgetType} />
+                        <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
                       </td>
                     );
                   }

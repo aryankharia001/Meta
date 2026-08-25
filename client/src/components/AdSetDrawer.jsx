@@ -10,7 +10,7 @@ import { useAdDrawer } from "../lib/AdDrawerContext";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { currency, number, multiplier, percent, formatDate } from "../lib/format";
-import { roasClass, statusBadgeClass, formatBudget } from "../lib/campaignDisplay";
+import { roasClass, statusBadgeClass, formatBudget, bidCapApplicability } from "../lib/campaignDisplay";
 import { AdThumbnail } from "./AdCells";
 import HourlyPanel from "./hourly/HourlyPanel";
 // Phase 27 — Budget & Bid Cap Control section. New, additive import;
@@ -18,6 +18,8 @@ import HourlyPanel from "./hourly/HourlyPanel";
 import BudgetBidControlSection from "./control/BudgetBidControlSection";
 import { shapeOrdersForPopup } from "../lib/shapeOrder";
 import { useOverlayEscape } from "../lib/overlayStack";
+// Phase 32 §4 — "Open in Meta Ads Manager" button. New, additive import.
+import OpenInMetaButton from "./OpenInMetaButton";
 
 // ─────────────────────────────────────────────────────────────
 // Phase 13 §10 — Ad Set Drawer. Mirrors CampaignDrawer.jsx's overall
@@ -137,7 +139,16 @@ export default function AdSetDrawer() {
                   {" · "}{activeAdSet?.adsetId}
                 </p>
               </div>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={closeAdSet}><X size={14} /></button>
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Phase 32 §4 — real Meta object deep link. */}
+                <OpenInMetaButton
+                  level="adset"
+                  accountId={adset?.accountId}
+                  campaignId={adset?.campaignId || activeAdSet?.campaignId}
+                  adsetId={activeAdSet?.adsetId}
+                />
+                <button type="button" className="btn btn-secondary btn-sm" onClick={closeAdSet}><X size={14} /></button>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
@@ -195,6 +206,22 @@ export default function AdSetDrawer() {
                       <Field label="Optimization Goal" value={adset?.optimizationGoal} />
                       <Field label="Billing Event" value={adset?.billingEvent} />
                       <Field label="Bid Strategy" value={adset?.bidStrategy} />
+                      {/* Phase 32 §2 — real Meta bid_amount when present;
+                          "Not Applicable" (never a fake ₹0) when Meta's own
+                          bid_strategy says this ad set's bidding doesn't use
+                          a manual cap; "Not set" otherwise — same three-way
+                          rule as CurrentValuesCard.jsx's Bid Cap tile above,
+                          just as a plain info field here. */}
+                      <Field
+                        label="Bid Cap"
+                        value={
+                          adset?.bidAmount !== null && adset?.bidAmount !== undefined
+                            ? currency(adset.bidAmount)
+                            : bidCapApplicability(adset?.bidStrategy) === "not_applicable"
+                            ? "Not Applicable"
+                            : "Not set"
+                        }
+                      />
                       <Field label="Targeting" value={adset?.targetingSummary} className="col-span-2 sm:col-span-3" />
                     </div>
                   </Section>

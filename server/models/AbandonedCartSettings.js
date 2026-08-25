@@ -21,13 +21,30 @@ import mongoose from "mongoose";
 
 const abandonedCartSettingsSchema = new mongoose.Schema(
   {
-    // Percentage, e.g. 70 means "70% of abandoned-cart orders are
-    // expected to convert into a real, delivered order" — §5's own
-    // example (100 carts × ₹500 @ 70% -> ₹35,000 recognized revenue).
+    // DEPRECATED as of Phase 33, kept only so no historical data is
+    // lost — was "% of abandoned-cart orders expected to convert into a
+    // real, delivered order". Not read anywhere in revenue math.
     deliveryRate: { type: Number, default: 70, min: 0, max: 100 },
-    // Per (expected-delivered) order, same semantics as the old
-    // per-record cost fields — see routes/abandonedCarts.js's
-    // computeSummary() for how these combine with deliveryRate.
+
+    // DEPRECATED as of Phase 34, kept only so no historical data is
+    // lost. Phase 33's status-based recognition (Traflead lead `status`
+    // in this list, optionally requiring shipment.status==="delivered")
+    // has been replaced entirely: revenue recognition is now purely
+    // "shipment.status === 'delivered'" (see trafleadSyncService.js's
+    // isDeliveredLead()) attributed to the delivered date, with no
+    // settings-configurable lead-status list and no manual percentage —
+    // "Actual delivered shipments determine the revenue," per spec.
+    recognizedLeadStatuses: {
+      type: [String],
+      default: ["confirmed"],
+    },
+    requireShipmentDelivered: { type: Boolean, default: true },
+
+    // Per DELIVERED order (Phase 34 — previously per "recognized" order
+    // under Phase 33's status-based rule; the formula itself — cost ×
+    // count — is unchanged, only what counts as a countable order has
+    // changed since, now driven by Phase 35's phone-matched shipment
+    // status). See trafleadSyncService.js's computeAbandonedCartSummary().
     manufacturingCost: { type: Number, default: 0, min: 0 },
     packagingCost: { type: Number, default: 0, min: 0 },
     shippingCost: { type: Number, default: 0, min: 0 },

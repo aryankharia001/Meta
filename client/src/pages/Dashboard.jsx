@@ -49,6 +49,8 @@ import { DataFreshnessBadge, SyncStatusIndicator } from "../components/LiveSyncW
 import RecentlyViewedWidget from "../components/RecentlyViewedWidget";
 import SavedViewsControl from "../components/SavedViewsControl";
 import DashboardCustomizePanel from "../components/DashboardCustomizePanel";
+import DeliveredRevenuePopup from "../components/DeliveredRevenuePopup";
+import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
 import { useDashboardLayout } from "../lib/dashboardLayout";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
 import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
@@ -365,6 +367,12 @@ export default function Dashboard() {
   const [abandonedCartSummary, setAbandonedCartSummary] = useState(null);
   const [abandonedCartLoading, setAbandonedCartLoading] = useState(false);
   const [abandonedCartError, setAbandonedCartError] = useState(null);
+  // Phase 34 — shipment-level rows behind the Delivered Revenue figure,
+  // for the drill-down popup. Same fetch as the summary above (no extra
+  // request) — just also keeping the part of the response the old code
+  // discarded.
+  const [abandonedCartDeliveredLeads, setAbandonedCartDeliveredLeads] = useState([]);
+  const [abandonedCartDeliveredLeadsTruncated, setAbandonedCartDeliveredLeadsTruncated] = useState(false);
 
   const loadAbandonedCartSummary = () => {
     if (!since || !until) return () => {};
@@ -375,6 +383,8 @@ export default function Dashboard() {
       .then((res) => {
         if (cancelled) return;
         setAbandonedCartSummary(res.summary || null);
+        setAbandonedCartDeliveredLeads(res.deliveredLeads || []);
+        setAbandonedCartDeliveredLeadsTruncated(!!res.deliveredLeadsTruncated);
       })
       .catch((err) => {
         if (!cancelled) setAbandonedCartError(err?.message || "Failed to load abandoned cart data");
@@ -585,6 +595,10 @@ export default function Dashboard() {
       recognizedRevenue: 0,
       totalExpenses: 0,
       netContribution: 0,
+      matched: 0,
+      unmatched: 0,
+      deliveredCount: 0,
+      notDeliveredMatched: 0,
     };
     const abandonedCartOrderCount = ac.orders || 0;
     const abandonedCartExpectedDelivered = ac.expectedDelivered || 0;
@@ -592,11 +606,20 @@ export default function Dashboard() {
     const abandonedCartRecognizedRevenue = ac.recognizedRevenue || 0;
     const abandonedCartExpenses = ac.totalExpenses || 0;
     const abandonedCartContribution = ac.netContribution || 0;
-    // Orders-weighted blended rate across every record in range, purely
-    // for a single headline percentage — each underlying record keeps
-    // its own actual configured rate (§10); this is a display rollup
-    // only, never used in any revenue/expense math above.
-    const abandonedCartDeliveryRate = abandonedCartOrderCount ? (abandonedCartExpectedDelivered / abandonedCartOrderCount) * 100 : 0;
+    // Phase 35 — of the leads ORDERED in this range, how many were
+    // phone-matched to a real shipment at all, and of those, how many
+    // currently read Delivered. Purely informational alongside the
+    // headline numbers; the revenue math above (ac.deliveredCount/
+    // ac.deliveredRevenue, aliased as expectedDelivered/
+    // recognizedRevenue for backward compatibility) already reflects
+    // exactly this same delivered subset.
+    const abandonedCartMatched = ac.matched || 0;
+    const abandonedCartUnmatched = ac.unmatched || 0;
+    const abandonedCartDeliveredCount = ac.deliveredCount || 0;
+    const abandonedCartNotDeliveredMatched = ac.notDeliveredMatched || 0;
+    // Delivered rate — what fraction of leads PLACED in this range are,
+    // as of now, phone-matched AND delivered. Display-only.
+    const abandonedCartDeliveryRate = abandonedCartOrderCount ? (abandonedCartDeliveredCount / abandonedCartOrderCount) * 100 : 0;
 
     // Total Gross Revenue = Actual Order Revenue + Additional Prepaid
     // Revenue (§2) + Recognized Abandoned Cart Revenue (§1/§10).
@@ -630,12 +653,39 @@ export default function Dashboard() {
     const otherExpenseRows = expenseBreakdown?.expenses || [];
     const otherExpensesTotal = Number(expenseBreakdown?.total) || 0;
 
+    // Phase 32 §3 — group configured expenses by their own `category`
+    // (never hardcoded — categories are whatever the user typed on the
+    // Expenses page, see server/models/Expense.js's header comment: "do
+    // not hard-code only these categories") so real categories like
+    // "Employee Salary" or "Fixed Expenses" render as their own line in
+    // the Dashboard's cost breakdown instead of being hidden inside one
+    // aggregate "Other Configured Expenses" number. Pure client-side
+    // regrouping of the exact same otherExpenseRows/otherExpensesTotal
+    // above — sums must always add back up to otherExpensesTotal; this
+    // never recomputes or changes a single expense's allocated amount.
+    const otherExpensesByCategory = (() => {
+      const map = new Map();
+      otherExpenseRows.forEach((row) => {
+        const key = row.category || "Uncategorized";
+        const cur = map.get(key) || { category: key, amount: 0, count: 0 };
+        cur.amount += Number(row.amount) || 0;
+        cur.count += 1;
+        map.set(key, cur);
+      });
+      return [...map.values()].sort((a, b) => b.amount - a.amount);
+    })();
+
     // Normal-order Recognized Revenue, exactly rollupOrders()'s formula in
     // server/routes/profitability.js (Prepaid + COD × success rate) —
     // kept as its own named figure (not just an intermediate step) so the
     // new full-width Gross Profit breakdown row (Phase 28) can show it
     // directly instead of re-deriving it from `profit`/`codRevenueLoss`.
-    const normalRecognizedRevenue = prepaidRevenueActual + additionalPrepaid + codRevenueActual * (codSuccessRate / 100);
+    // Phase 32 §3 — codRecognizedRevenue is the COD half of this sum,
+    // broken out on its own (same number, just no longer hidden inside
+    // the combined total) so the breakdown can show "COD Recognized
+    // Revenue" as its own line per the spec's Revenue section.
+    const codRecognizedRevenue = codRevenueActual * (codSuccessRate / 100);
+    const normalRecognizedRevenue = prepaidRevenueActual + additionalPrepaid + codRecognizedRevenue;
 
     // Gross Profit now nets out of Total Gross Revenue (real + additional
     // prepaid + abandoned cart), the COD-risk discount, GST-inclusive ad
@@ -689,6 +739,9 @@ export default function Dashboard() {
           totalPrepaidRevenue,
           codRevenue: codRevenueActual,
           codSuccessRate,
+          // Phase 32 §3 — COD Recognized Revenue as its own figure (see
+          // codRecognizedRevenue above).
+          codRecognizedRevenue,
           recognizedRevenue: normalRecognizedRevenue,
         },
         abandonedCart: {
@@ -698,6 +751,13 @@ export default function Dashboard() {
           potentialRevenue: abandonedCartPotentialRevenue,
           recognizedRevenue: abandonedCartRecognizedRevenue,
           expenses: abandonedCartExpenses,
+          // Phase 35
+          matched: abandonedCartMatched,
+          unmatched: abandonedCartUnmatched,
+          deliveredCount: abandonedCartDeliveredCount,
+          notDeliveredMatched: abandonedCartNotDeliveredMatched,
+          deliveredRevenue: abandonedCartRecognizedRevenue,
+          profit: abandonedCartContribution,
         },
         totalRecognizedRevenue,
         expenses: {
@@ -711,6 +771,9 @@ export default function Dashboard() {
           abandonedCartExpenses,
           otherExpenseRows,
           otherExpensesTotal,
+          // Phase 32 §3 — same rows/total as above, regrouped by category
+          // (see otherExpensesByCategory above).
+          otherExpensesByCategory,
           totalExpenses: totalExpensesFull,
         },
         grossProfit: grossProfitFull,
@@ -729,6 +792,11 @@ export default function Dashboard() {
         abandonedCartRecognizedRevenue,
         abandonedCartExpenses,
         abandonedCartContribution,
+        // Phase 35
+        abandonedCartMatched,
+        abandonedCartUnmatched,
+        abandonedCartDeliveredCount,
+        abandonedCartNotDeliveredMatched,
         totalGrossRevenue,
       },
       spendBreakdown: {
@@ -1020,12 +1088,16 @@ export default function Dashboard() {
                       {...c}
                       pinned={pinned}
                       wide={wide}
+                      since={since}
+                      until={until}
                       breakdown={cardValues.revenueBreakdown}
                       additionalPrepaidRevenue={additionalPrepaidRevenue}
                       onAdditionalPrepaidRevenueChange={setAdditionalPrepaidRevenue}
                       abandonedCartLoading={abandonedCartLoading}
                       abandonedCartError={abandonedCartError}
                       onRetryAbandonedCart={loadAbandonedCartSummary}
+                      abandonedCartDeliveredLeads={abandonedCartDeliveredLeads}
+                      abandonedCartDeliveredLeadsTruncated={abandonedCartDeliveredLeadsTruncated}
                       onClick={onClick}
                     />
                   );
@@ -1050,12 +1122,29 @@ export default function Dashboard() {
               abandonedCartLoading={abandonedCartLoading}
               abandonedCartError={abandonedCartError}
               onRetryAbandonedCart={loadAbandonedCartSummary}
+              abandonedCartDeliveredLeads={abandonedCartDeliveredLeads}
+              abandonedCartDeliveredLeadsTruncated={abandonedCartDeliveredLeadsTruncated}
               expenseBreakdownLoading={expenseBreakdownLoading}
               expenseBreakdownError={expenseBreakdownError}
               onRetryExpenseBreakdown={loadExpenseBreakdown}
               onDrill={(key) => data && setActivePopupCard({ key })}
               onOpenOtherExpenses={() => setOtherExpensesPopupOpen(true)}
             />
+
+            {/* Phase 37 — a standalone Abandoned Cart box, additive to the
+                bespoke Abandoned Cart figures already inside the Revenue
+                card's dropdown and the Complete Cost Breakdown section
+                above. Those two stay exactly as they are (same data, same
+                math) — this is just the same self-contained summary card
+                already used on Daily/Analytics/Profitability/Campaign
+                Explorer, now also on the Dashboard, for an at-a-glance view
+                (Total/Delivered/Non-Delivered Orders, Confirmed Revenue,
+                Shipment Matched, Awaiting Verification, Profit, and its own
+                collapsed-by-default cost breakdown) without needing to open
+                either of the sections above. It fetches independently
+                (GET /api/abandoned-carts?since=&until=) — no new state or
+                calculation added to this page. */}
+            <AbandonedCartSummaryCard since={since} until={until} className="mb-8" />
           </>
         )}
 
@@ -1133,7 +1222,7 @@ export default function Dashboard() {
                               if (c.key === "budget") {
                                 return (
                                   <td key={c.key} className="num">
-                                    <BudgetCell budget={campaign.budget} budgetType={campaign.budgetType} />
+                                    <BudgetCell budget={campaign.budget} budgetType={campaign.budgetType} budgetSource={campaign.budgetSource} />
                                   </td>
                                 );
                               }
@@ -1527,11 +1616,21 @@ function CostInput({ label, value, onChange }) {
 // a formatted value (currency by default; pass `format` for a count or
 // percentage — see the Abandoned Cart Orders rows below), optionally
 // emphasized for rollup totals.
-function BreakdownRow({ label, value, strong, format = currency }) {
+function BreakdownRow({ label, value, strong, format = currency, onClick }) {
   return (
     <div className="flex items-center justify-between gap-2">
       <label className={`text-[11px] ${strong ? "text-slate-600 font-medium" : "text-slate-400"}`}>{label}</label>
-      <span className={`text-xs font-medium ${strong ? "text-slate-800" : "text-slate-600"}`}>{format(value)}</span>
+      {onClick ? (
+        <button
+          type="button"
+          onClick={onClick}
+          className={`text-xs font-medium hover:underline ${strong ? "text-slate-800" : "text-slate-600"}`}
+        >
+          {format(value)}
+        </button>
+      ) : (
+        <span className={`text-xs font-medium ${strong ? "text-slate-800" : "text-slate-600"}`}>{format(value)}</span>
+      )}
     </div>
   );
 }
@@ -1578,15 +1677,20 @@ function RevenueCard({
   display,
   pinned,
   wide,
+  since,
+  until,
   breakdown,
   additionalPrepaidRevenue,
   onAdditionalPrepaidRevenueChange,
   abandonedCartLoading,
   abandonedCartError,
   onRetryAbandonedCart,
+  abandonedCartDeliveredLeads,
+  abandonedCartDeliveredLeadsTruncated,
   onClick,
 }) {
   const [open, setOpen] = useState(false);
+  const [drilldownOpen, setDrilldownOpen] = useState(false);
 
   return (
     <div
@@ -1634,11 +1738,15 @@ function RevenueCard({
           />
           <BreakdownRow label="Total Prepaid Revenue" value={breakdown.totalPrepaidRevenue} strong />
           <BreakdownRow label="COD Revenue" value={breakdown.codRevenueActual} />
-          <BreakdownRow label="Recognized Abandoned Cart Revenue" value={breakdown.abandonedCartRecognizedRevenue} />
+          <BreakdownRow
+            label="Delivered Abandoned Cart Revenue"
+            value={breakdown.abandonedCartRecognizedRevenue}
+            onClick={() => setDrilldownOpen(true)}
+          />
           <BreakdownRow label="Total Gross Revenue" value={breakdown.totalGrossRevenue} strong />
 
           <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-slate-100">
-            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Abandoned Cart Orders</div>
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Abandoned Cart</div>
             {abandonedCartLoading && <Loader2 size={11} className="animate-spin text-slate-300 shrink-0" />}
           </div>
           {abandonedCartError ? (
@@ -1650,15 +1758,31 @@ function RevenueCard({
             </div>
           ) : (
             <>
-              <BreakdownRow label="Abandoned Cart Orders" value={breakdown.abandonedCartOrders} format={number} />
-              <BreakdownRow label="Delivery Rate" value={breakdown.abandonedCartDeliveryRate} format={(v) => `${Number(v || 0).toFixed(2)}%`} />
-              <BreakdownRow label="Expected Delivered Orders" value={breakdown.abandonedCartExpectedDelivered} format={(v) => Number(v || 0).toFixed(2)} />
+              <BreakdownRow label="Abandoned Cart Leads (synced from Traflead)" value={breakdown.abandonedCartOrders} format={number} />
+              <BreakdownRow label="Shipment Matched (by phone)" value={breakdown.abandonedCartMatched} format={number} />
+              <BreakdownRow label="Delivered" value={breakdown.abandonedCartDeliveredCount} format={number} />
+              <BreakdownRow label="Not Delivered (matched, not yet)" value={breakdown.abandonedCartNotDeliveredMatched} format={number} />
+              <BreakdownRow label="No Shipment Matched" value={breakdown.abandonedCartUnmatched} format={number} />
               <BreakdownRow label="Gross Potential Revenue" value={breakdown.abandonedCartPotentialRevenue} />
-              <BreakdownRow label="Recognized Abandoned Cart Revenue" value={breakdown.abandonedCartRecognizedRevenue} strong />
+              <BreakdownRow
+                label="Delivered Revenue (of shipments delivered this period)"
+                value={breakdown.abandonedCartRecognizedRevenue}
+                strong
+                onClick={() => setDrilldownOpen(true)}
+              />
               <BreakdownRow label="Abandoned Cart Expenses" value={breakdown.abandonedCartExpenses} />
-              <BreakdownRow label="Net Abandoned Cart Contribution" value={breakdown.abandonedCartContribution} strong />
+              <BreakdownRow label="Abandoned Cart Profit" value={breakdown.abandonedCartContribution} strong />
             </>
           )}
+
+          <DeliveredRevenuePopup
+            open={drilldownOpen}
+            since={since}
+            until={until}
+            leads={abandonedCartDeliveredLeads || []}
+            truncated={abandonedCartDeliveredLeadsTruncated}
+            onClose={() => setDrilldownOpen(false)}
+          />
 
           <Link
             to="/abandoned-carts"
@@ -1789,12 +1913,21 @@ function GrossProfitSection({
   abandonedCartLoading,
   abandonedCartError,
   onRetryAbandonedCart,
+  abandonedCartDeliveredLeads,
+  abandonedCartDeliveredLeadsTruncated,
   expenseBreakdownLoading,
   expenseBreakdownError,
   onRetryExpenseBreakdown,
   onDrill,
   onOpenOtherExpenses,
 }) {
+  const [abandonedCartDrilldownOpen, setAbandonedCartDrilldownOpen] = useState(false);
+  // Phase 36 §5 — collapsed by default so this full breakdown doesn't
+  // overload the Dashboard on load; purely local UI state, toggling it
+  // never refetches or recomputes anything — `breakdown` (and everything
+  // derived from it below) is already fully computed and passed in
+  // regardless of whether this section is shown expanded or collapsed.
+  const [expanded, setExpanded] = useState(false);
   if (!breakdown) return null;
   const { normalOrders, abandonedCart, expenses } = breakdown;
   const rangeLabel = since === until ? since : `${since} → ${until}`;
@@ -1802,22 +1935,43 @@ function GrossProfitSection({
 
   return (
     <section className="card !p-0 overflow-hidden mb-8">
-      <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 gap-3 flex-wrap">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="w-full flex items-center justify-between px-5 py-4 border-b border-slate-100 gap-3 flex-wrap text-left hover:bg-slate-50/60 transition-colors"
+        title={expanded ? "Collapse breakdown" : "Click to expand the complete breakdown"}
+      >
         <div>
           <h2 className="font-display font-semibold text-slate-800 text-sm flex items-center gap-1.5">
-            <PiggyBank size={15} className="text-emerald-600" /> Gross Profit Breakdown
+            <PiggyBank size={15} className="text-emerald-600" /> Complete Cost Breakdown
           </h2>
           <p className="text-[11px] text-slate-400 mt-0.5">
-            Exactly where Gross Profit comes from and where it goes, for {rangeLabel}. Click any value to drill in.
+            {expanded
+              ? `Every rupee of revenue and expense behind Pure Profit — same total as the Gross Profit card above, fully itemized — for ${rangeLabel}. Click any value to drill in.`
+              : `Click to see every rupee of revenue and expense behind this figure, for ${rangeLabel}.`}
           </p>
         </div>
-        <div className={`text-right rounded-xl border px-4 py-2 ${isProfit ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Gross Profit</div>
-          <div className={`text-xl font-display font-bold ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>{currency(breakdown.grossProfit)}</div>
-          <div className="text-[10px] text-slate-400">{Number(breakdown.profitMargin || 0).toFixed(2)}% margin</div>
+        <div className="flex items-center gap-2">
+          {/* Phase 32 §3 — relabeled "Pure Profit" here (spec's own term for
+              a revenue figure with every real expense already netted out —
+              product costs, marketing costs incl. GST, and every other
+              configured expense below). Identical number to the "Gross
+              Profit" KPI card above; nothing about how it's computed
+              changed, only how it's presented in this full breakdown. This
+              box IS the compact summary Phase 36 §5 asks for — always
+              visible whether the detailed breakdown below is expanded or
+              not. */}
+          <div className={`text-right rounded-xl border px-4 py-2 ${isProfit ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Pure Profit</div>
+            <div className={`text-xl font-display font-bold ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>{currency(breakdown.grossProfit)}</div>
+            <div className="text-[10px] text-slate-400">{Number(breakdown.profitMargin || 0).toFixed(2)}% margin</div>
+          </div>
+          <ChevronDown size={16} className={`text-slate-400 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
         </div>
-      </div>
+      </button>
 
+      {expanded && (
+        <>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-100 border-b border-slate-100">
         {/* Normal Orders */}
         <div className="p-5">
@@ -1831,9 +1985,19 @@ function GrossProfitSection({
             {normalOrders.additionalPrepaidRevenue > 0 && (
               <StatRow label="+ Additional Prepaid Revenue (manual)" value={normalOrders.additionalPrepaidRevenue} muted />
             )}
-            <StatRow label="COD Revenue" value={normalOrders.codRevenue} onClick={() => onDrill("cod")} />
+            {/* Phase 32 §3 — COD Revenue (raw, before the delivery-success
+                haircut) and COD Recognized Revenue (after it) shown as two
+                distinct lines, rather than only the combined
+                Prepaid+COD total below — same underlying numbers, just no
+                longer hidden inside one figure. */}
+            <StatRow label="COD Revenue (before delivery-success adjustment)" value={normalOrders.codRevenue} onClick={() => onDrill("cod")} muted />
             <StatRow
-              label={`Recognized Revenue (COD @ ${Number(normalOrders.codSuccessRate || 0).toFixed(0)}%)`}
+              label={`COD Recognized Revenue (@ ${Number(normalOrders.codSuccessRate || 0).toFixed(0)}% success rate)`}
+              value={normalOrders.codRecognizedRevenue}
+              onClick={() => onDrill("cod")}
+            />
+            <StatRow
+              label="Recognized Revenue (Normal Orders)"
               value={normalOrders.recognizedRevenue}
               onClick={() => onDrill("revenue")}
               strong
@@ -1860,27 +2024,38 @@ function GrossProfitSection({
           ) : (
             <div className="divide-y divide-slate-50">
               <Link to={`/abandoned-carts?since=${since}&until=${until}`} className="flex items-center justify-between gap-2 py-1 -mx-1.5 px-1.5 rounded-md hover:bg-slate-50 transition-colors">
-                <span className="text-[12px] text-slate-500">Abandoned Cart Orders</span>
+                <span className="text-[12px] text-slate-500">Abandoned Cart Leads (Traflead)</span>
                 <span className="text-[13px] font-medium text-slate-700 flex items-center gap-1">
                   {number(abandonedCart.orders)} <ExternalLink size={10} className="text-slate-300" />
                 </span>
               </Link>
+              <StatRow label="Shipment Matched (by phone)" value={abandonedCart.matched} format={number} />
+              <StatRow label="Delivered" value={abandonedCart.deliveredCount} format={number} />
+              <StatRow label="Not Delivered (matched, not yet)" value={abandonedCart.notDeliveredMatched} format={number} muted />
+              <StatRow label="No Shipment Matched" value={abandonedCart.unmatched} format={number} muted />
               <Link to={`/abandoned-carts?since=${since}&until=${until}`} className="flex items-center justify-between gap-2 py-1 -mx-1.5 px-1.5 rounded-md hover:bg-slate-50 transition-colors">
                 <span className="text-[12px] text-slate-500">Potential Revenue</span>
                 <span className="text-[13px] font-medium text-slate-700">{currency(abandonedCart.potentialRevenue)}</span>
               </Link>
-              <StatRow label="Delivery / Success Rate" value={abandonedCart.deliveryRate} format={(v) => `${Number(v || 0).toFixed(2)}%`} />
-              <Link
-                to={`/abandoned-carts?since=${since}&until=${until}`}
-                className="flex items-center justify-between gap-2 py-1 -mx-1.5 px-1.5 rounded-md hover:bg-slate-50 transition-colors"
-              >
-                <span className="text-[12px] text-slate-700 font-medium">Recognized Abandoned Cart Revenue</span>
-                <span className="text-[13px] font-semibold text-slate-800 flex items-center gap-1">
-                  {currency(abandonedCart.recognizedRevenue)} <ExternalLink size={10} className="text-slate-300" />
-                </span>
-              </Link>
+              <StatRow
+                label="Delivered Revenue"
+                value={abandonedCart.deliveredRevenue}
+                onClick={() => setAbandonedCartDrilldownOpen(true)}
+                strong
+              />
+              <StatRow label="Abandoned Cart Expenses" value={abandonedCart.expenses} muted />
+              <StatRow label="Abandoned Cart Profit" value={abandonedCart.profit} strong />
             </div>
           )}
+
+          <DeliveredRevenuePopup
+            open={abandonedCartDrilldownOpen}
+            since={since}
+            until={until}
+            leads={abandonedCartDeliveredLeads || []}
+            truncated={abandonedCartDeliveredLeadsTruncated}
+            onClose={() => setAbandonedCartDrilldownOpen(false)}
+          />
         </div>
       </div>
 
@@ -1899,31 +2074,56 @@ function GrossProfitSection({
           </div>
           {expenseBreakdownLoading && <Loader2 size={11} className="animate-spin text-slate-300" />}
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8">
-          <div className="divide-y divide-slate-50">
-            <StatRow label="Product / Manufacturing Cost" value={expenses.productCost} onClick={() => onDrill("totalOrders")} />
-            <StatRow label="Packaging Cost" value={expenses.packagingCost} onClick={() => onDrill("totalOrders")} />
-            <StatRow label="Shipping Cost" value={expenses.shippingCost} onClick={() => onDrill("totalOrders")} />
-            <StatRow label="Miscellaneous Per-Order Cost" value={expenses.miscCost} onClick={() => onDrill("totalOrders")} />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-4">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Product Costs</div>
+            <div className="divide-y divide-slate-50">
+              <StatRow label="Manufacturing / Product Cost" value={expenses.productCost} onClick={() => onDrill("totalOrders")} />
+              <StatRow label="Packaging Cost" value={expenses.packagingCost} onClick={() => onDrill("totalOrders")} />
+              <StatRow label="Shipping Cost" value={expenses.shippingCost} onClick={() => onDrill("totalOrders")} />
+              <StatRow label="Miscellaneous Per-Order Cost" value={expenses.miscCost} onClick={() => onDrill("totalOrders")} />
+            </div>
           </div>
-          <div className="divide-y divide-slate-50">
-            <StatRow label="Meta Ad Spend" value={expenses.metaAdSpend} onClick={() => onDrill("spend")} />
-            <StatRow label="GST on Ad Spend (18%)" value={expenses.gstOnAdSpend} onClick={() => onDrill("spend")} />
-            <StatRow label="Abandoned Cart Expenses" value={expenses.abandonedCartExpenses} />
-            {expenseBreakdownError ? (
-              <div className="text-[11px] text-rose-500 flex items-center justify-between gap-2 py-1">
-                <span className="truncate">Couldn't load other expenses</span>
-                <button type="button" className="underline shrink-0" onClick={onRetryExpenseBreakdown}>
-                  Retry
-                </button>
+          <div className="space-y-3.5">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Marketing Costs</div>
+              <div className="divide-y divide-slate-50">
+                <StatRow label="Meta Ad Spend" value={expenses.metaAdSpend} onClick={() => onDrill("spend")} />
+                <StatRow label="GST on Ad Spend (18%)" value={expenses.gstOnAdSpend} onClick={() => onDrill("spend")} />
               </div>
-            ) : (
-              <StatRow
-                label={`Other Configured Expenses (${expenses.otherExpenseRows?.length || 0})`}
-                value={expenses.otherExpensesTotal}
-                onClick={expenses.otherExpenseRows?.length ? onOpenOtherExpenses : undefined}
-              />
-            )}
+            </div>
+            {/* Phase 32 §3 — Other Expenses, broken out by real category
+                (Employee Salary, Fixed Expenses, Miscellaneous, or
+                whatever the user actually configured on the Expenses
+                page — see otherExpensesByCategory above, never
+                hardcoded) instead of one aggregate "Other Configured
+                Expenses" number. Each category row still opens the same
+                existing drill-down popup as before. */}
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Other Expenses</div>
+              <div className="divide-y divide-slate-50">
+                <StatRow label="Abandoned Cart Expenses" value={expenses.abandonedCartExpenses} />
+                {expenseBreakdownError ? (
+                  <div className="text-[11px] text-rose-500 flex items-center justify-between gap-2 py-1">
+                    <span className="truncate">Couldn't load other expenses</span>
+                    <button type="button" className="underline shrink-0" onClick={onRetryExpenseBreakdown}>
+                      Retry
+                    </button>
+                  </div>
+                ) : (expenses.otherExpensesByCategory || []).length > 0 ? (
+                  expenses.otherExpensesByCategory.map((c) => (
+                    <StatRow
+                      key={c.category}
+                      label={`${c.category} (${c.count})`}
+                      value={c.amount}
+                      onClick={onOpenOtherExpenses}
+                    />
+                  ))
+                ) : (
+                  <StatRow label="No other expenses configured" value={0} muted />
+                )}
+              </div>
+            </div>
           </div>
         </div>
         <div className="flex items-center justify-between pt-2.5 mt-2 border-t border-slate-100">
@@ -1947,9 +2147,11 @@ function GrossProfitSection({
           <FormulaOperator icon={Minus} />
           <FormulaTile label="Total Expenses" value={expenses.totalExpenses} accent="rose" />
           <FormulaOperator icon={Equal} />
-          <FormulaTile label="Gross Profit" value={breakdown.grossProfit} accent={isProfit ? "emerald" : "rose"} sub={`${Number(breakdown.profitMargin || 0).toFixed(2)}% margin`} />
+          <FormulaTile label="Pure Profit" value={breakdown.grossProfit} accent={isProfit ? "emerald" : "rose"} sub={`${Number(breakdown.profitMargin || 0).toFixed(2)}% margin`} />
         </div>
       </div>
+        </>
+      )}
     </section>
   );
 }
