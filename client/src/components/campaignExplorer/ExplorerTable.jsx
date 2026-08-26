@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, ChevronLeft, Columns3, GripVertical, Pin, Pi
 import { ALL_COLUMNS, DEFAULT_HIDDEN } from "../../lib/campaignExplorerColumns";
 import ExpandedRowContent from "./ExpandedRowContent";
 import { useColumnPrefs } from "../../lib/useColumnPrefs";
-import { LiveIndicator, RoasValue, StatusPill, BudgetCell } from "../CampaignCells";
+import { LiveIndicator, RoasValue, StatusPill, BudgetCell, BidCapCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — Campaign Explorer's dense data table. Purpose-built rather
@@ -359,6 +359,16 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
                           return (
                             <td key={col.key} className={`${alignClass} ${pinClass}`} style={style}>
                               <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
+                            </td>
+                          );
+                        }
+                        // Phase 38 — Campaign Bid Cap Fallback to Ad Set,
+                        // same "rich JSX in the table, plain text for
+                        // CSV" split as budget just above.
+                        if (col.key === "bidCap") {
+                          return (
+                            <td key={col.key} className={`${alignClass} ${pinClass}`} style={style}>
+                              <BidCapCell bidCapMin={c.bidCapMin} bidCapMax={c.bidCapMax} bidCapSource={c.bidCapSource} />
                             </td>
                           );
                         }

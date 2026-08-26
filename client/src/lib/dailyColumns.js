@@ -1,6 +1,6 @@
 import { currency, number, multiplier } from "./format";
 import { formatDayLabel } from "./dateIst";
-import { formatBudget } from "./campaignDisplay";
+import { formatBudget, formatBidCapText } from "./campaignDisplay";
 
 // Phase 10 — Daily page's per (day, campaign) row columns. Same shape
 // campaignExplorerColumns.js (Phase 8) established for Campaign
@@ -19,6 +19,7 @@ export const DAILY_COLUMNS = [
   { key: "campaignId", label: "Campaign ID", defaultWidth: 150, render: (r) => r.campaignId || "N/A" },
   { key: "status", label: "Status", defaultWidth: 110, align: "center", render: (r) => r.effectiveStatus || r.status || "N/A" },
   { key: "budget", label: "Budget", defaultWidth: 130, align: "right", render: (r) => formatBudget(r.budget, r.budgetType) || "N/A" },
+  { key: "bidCap", label: "Bid Cap", defaultWidth: 130, align: "right", render: (r) => formatBidCapText(r) },
   { key: "spend", label: "Spend", defaultWidth: 100, align: "right", render: (r) => currency(r.spend) },
   { key: "orders", label: "Orders", defaultWidth: 90, align: "right", render: (r) => number(r.orders) },
   { key: "matchedOrders", label: "Matched Orders", defaultWidth: 130, align: "right", render: (r) => number(r.matchedOrders) },

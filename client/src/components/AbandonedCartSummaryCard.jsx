@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { ShoppingBag, ExternalLink, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import { fetchAbandonedCarts } from "../lib/api";
 import { currency, number } from "../lib/format";
-import DeliveredRevenuePopup from "./DeliveredRevenuePopup";
+import AbandonedCartEventPopup from "./AbandonedCartEventPopup";
 
 // ─────────────────────────────────────────────────────────────
 // Phase 33 — "wire the synced Traflead Abandoned Cart dataset through
@@ -56,13 +56,24 @@ import DeliveredRevenuePopup from "./DeliveredRevenuePopup";
 // Phase 34/35/36 §1 built are kept, informational only, in their own
 // clearly separate row — they still verify real shipment status, they
 // just no longer drive revenue on their own.
+//
+// Phase 40 — every count in the stat grid is now clickable (spec §11/§17
+// "every count must be clickable"), each opening AbandonedCartEventPopup
+// scoped to its own lifecycle event (created/cnf/delivered/cancelled/
+// returned) — the popup fetches its own drill-down data on open rather
+// than this card embedding it up front, so a page load no longer pays for
+// drill-down data that may never be opened. cnfLeadsCount/deliveredCount/
+// etc. are now genuinely dated by when each event happened (see
+// trafleadSyncService.js's Phase 40 header comment), not by
+// orderDateIst — this component itself needed no formula changes, only
+// the two new Cancelled/Returned tiles and the click-to-drill-down wiring.
 // ─────────────────────────────────────────────────────────────
 
 export default function AbandonedCartSummaryCard({ since, until, className = "" }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [drilldownOpen, setDrilldownOpen] = useState(false);
+  const [drilldownEvent, setDrilldownEvent] = useState(null);
   const [breakdownOpen, setBreakdownOpen] = useState(false);
 
   useEffect(() => {
@@ -104,35 +115,66 @@ export default function AbandonedCartSummaryCard({ since, until, className = "" 
         </div>
       ) : summary ? (
         <>
-          {/* Phase 37 — CNF-based revenue, the primary figures. */}
+          {/* Phase 37/40 — CNF-based revenue, the primary figures. Every
+              count is clickable (Phase 40 §11/§17), each opening the
+              matching lifecycle event's drill-down. */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-2 text-xs">
-            <Stat label="Total Abandoned Cart Orders" sub="placed this period" value={number(summary.totalOrders ?? summary.orders)} />
-            <Stat label="CNF / Confirmed Leads" sub="status = confirmed" value={number(summary.cnfLeadsCount)} />
+            <Stat
+              label="Total Abandoned Cart Orders"
+              sub="placed this period"
+              value={number(summary.totalOrders ?? summary.orders)}
+              onClick={() => setDrilldownEvent("created")}
+            />
+            <Stat
+              label="CNF / Confirmed Orders"
+              sub="dated by CNF date"
+              value={number(summary.cnfLeadsCount)}
+              onClick={() => setDrilldownEvent("cnf")}
+            />
             <Stat label="CNF Revenue Rate" sub="configurable" value={`${number(summary.cnfRevenueRate)}%`} />
             <Stat label="Revenue Counted" sub="CNF × rate" value={number(summary.cnfRevenueCountedCount)} />
             <Stat label="Confirmed Revenue" sub="CNF-based" value={currency(summary.confirmedRevenue ?? summary.cnfRevenue)} strong />
             <Stat label="Abandoned Cart Profit" sub="revenue − expenses" value={currency(summary.profit)} strong />
           </div>
           <div className="text-[10px] text-slate-400 italic -mt-1">
-            Revenue calculated from CNF leads × selected CNF revenue rate.
+            Revenue calculated from orders CONFIRMED in this range × the CNF revenue rate — never the orders created in range.
           </div>
 
-          {/* Phase 34/35/36 §1 — shipment verification, informational only
-              as of Phase 37 (kept, no longer a revenue driver). */}
+          {/* Phase 40 — lifecycle events, each dated by when it actually
+              happened and each clickable to its own drill-down. */}
           <div className="rounded-lg border border-slate-100 bg-slate-50/50 p-2.5">
             <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1.5">
-              Shipment verification (informational — doesn't affect revenue)
+              Lifecycle (dated by when each event actually happened)
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-3 gap-y-1.5 text-xs">
               <Stat label="Shipment Matched" sub="phone found a shipment" value={number(summary.matched)} muted />
-              <Stat label="Delivered" sub="shipment confirmed delivered" value={number(summary.deliveredOrders ?? summary.deliveredCount)} muted />
-              <Stat label="Not Delivered" sub="matched, not yet" value={number(summary.notDeliveredMatched)} muted />
+              <Stat
+                label="Delivered"
+                sub="dated by delivery date"
+                value={number(summary.deliveredOrders ?? summary.deliveredCount)}
+                onClick={() => setDrilldownEvent("delivered")}
+                muted
+              />
+              <Stat
+                label="Cancelled"
+                sub="lead or shipment cancelled"
+                value={number(summary.cancelledCount)}
+                onClick={() => setDrilldownEvent("cancelled")}
+                muted
+              />
+              <Stat
+                label="Returned"
+                sub="RTO / reverse delivery"
+                value={number(summary.returnedCount)}
+                onClick={() => setDrilldownEvent("returned")}
+                muted
+              />
               <Stat label="Awaiting Verification" sub="shipment lookup not run yet" value={number(summary.pendingVerification)} muted />
               <Stat
                 label="Delivered Revenue"
                 sub="shipment-based, info only"
                 value={currency(summary.deliveredRevenue)}
-                onClick={() => setDrilldownOpen(true)}
+                onClick={() => setDrilldownEvent("delivered")}
                 muted
               />
             </div>
@@ -172,17 +214,16 @@ export default function AbandonedCartSummaryCard({ since, until, className = "" 
           )}
 
           <div className="text-[10px] text-slate-400">
-            CNF Leads: {number(summary.cnfLeadsCount)} out of {number(summary.totalOrders ?? summary.orders)} total orders in this
-            period had a Traflead status of "confirmed." The CNF Revenue Rate is a manual assumption — it changes how much
-            revenue is counted, never the actual order or CNF lead counts.
+            CNF Orders: {number(summary.cnfLeadsCount)} became confirmed in this date range (dated by their own CNF date, not the
+            date they were created). The CNF Revenue Rate is a manual assumption — it changes how much revenue is counted, never
+            the actual order or CNF order counts.
           </div>
-          <DeliveredRevenuePopup
-            open={drilldownOpen}
+          <AbandonedCartEventPopup
+            open={!!drilldownEvent}
             since={since}
             until={until}
-            leads={data?.deliveredLeads || []}
-            truncated={data?.deliveredLeadsTruncated}
-            onClose={() => setDrilldownOpen(false)}
+            event={drilldownEvent}
+            onClose={() => setDrilldownEvent(null)}
           />
         </>
       ) : (

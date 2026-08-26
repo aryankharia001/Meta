@@ -4,7 +4,7 @@ import { SectionHeading, Leaderboard } from "./chartKit";
 import { currency, number, multiplier, percent } from "../../lib/format";
 import { downloadCsv } from "../../lib/csv";
 import CampaignLink from "../CampaignLink";
-import { LiveIndicator, RoasValue, BudgetCell } from "../CampaignCells";
+import { LiveIndicator, RoasValue, BudgetCell, BidCapCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Campaign Performance — leaderboards sourced from the existing,
@@ -80,6 +80,9 @@ export default function CampaignSection({ campaignData, tokenId, since, until })
       <td className="num">
         <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
       </td>
+      <td className="num">
+        <BidCapCell bidCapMin={c.bidCapMin} bidCapMax={c.bidCapMax} bidCapSource={c.bidCapSource} />
+      </td>
       <td className="num metric-primary">{currency(c.spend)}</td>
       <td className="num metric-primary">{currency(c.revenue)}</td>
       <td className="num">
@@ -90,7 +93,7 @@ export default function CampaignSection({ campaignData, tokenId, since, until })
     </tr>
   );
 
-  const columns = (metricLabel) => ["Campaign", "Budget", "Spend", "Revenue", "ROAS", "Orders", metricLabel];
+  const columns = (metricLabel) => ["Campaign", "Budget", "Bid Cap", "Spend", "Revenue", "ROAS", "Orders", metricLabel];
 
   return (
     <div className="space-y-5 mb-8">

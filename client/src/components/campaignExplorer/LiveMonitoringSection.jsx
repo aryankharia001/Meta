@@ -14,7 +14,7 @@ import { fetchLiveCampaignExplorer } from "../../lib/api";
 import { getCachedLiveExplorer, setCachedLiveExplorer } from "../../lib/campaignExplorerCache";
 import { useLiveSync } from "../../lib/LiveSyncContext";
 import { currency, number, percent, multiplier, formatDateTime } from "../../lib/format";
-import { LiveIndicator, RoasValue, BudgetCell } from "../CampaignCells";
+import { LiveIndicator, RoasValue, BudgetCell, BidCapCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 8 — Live Campaign Monitoring. A self-contained section at the
@@ -243,6 +243,7 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
     { key: "campaignName", label: "Campaign", defaultWidth: 220 },
     { key: "accountName", label: "Ad Account" },
     { key: "budget", label: "Budget" },
+    { key: "bidCap", label: "Bid Cap" },
     { key: "spend", label: "Spend Today", render: (c) => currency(c.spend) },
     { key: "reach", label: "Reach", render: (c) => number(c.reach) },
     { key: "impressions", label: "Impressions", render: (c) => number(c.impressions) },
@@ -321,6 +322,13 @@ function LiveCampaignTable({ campaigns, onOpenCampaign }) {
                     return (
                       <td key={col.key}>
                         <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
+                      </td>
+                    );
+                  }
+                  if (col.key === "bidCap") {
+                    return (
+                      <td key={col.key}>
+                        <BidCapCell bidCapMin={c.bidCapMin} bidCapMax={c.bidCapMax} bidCapSource={c.bidCapSource} />
                       </td>
                     );
                   }

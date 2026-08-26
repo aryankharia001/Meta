@@ -1,8 +1,8 @@
 import { Inbox } from "lucide-react";
 import { currency, number, multiplier } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
-import { formatBudget, roasClass } from "../../lib/campaignDisplay";
-import { LiveIndicator, BudgetCell } from "../CampaignCells";
+import { formatBudget, formatBidCapText, roasClass } from "../../lib/campaignDisplay";
+import { LiveIndicator, BudgetCell, BidCapCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 (campaign selection) — "Campaign Comparison Mode". Only
@@ -22,6 +22,7 @@ import { LiveIndicator, BudgetCell } from "../CampaignCells";
 
 const COMPARE_METRICS = [
   { key: "budget", label: "Budget", format: (v, c) => formatBudget(c?.budget, c?.budgetType) || "N/A" },
+  { key: "bidCap", label: "Bid Cap", format: (v, c) => formatBidCapText(c || {}) },
   { key: "spend", label: "Spend", format: currency },
   { key: "orders", label: "Orders", format: number },
   { key: "revenue", label: "Revenue", format: currency },
@@ -88,6 +89,8 @@ export default function DailyCompareView({ days, onOpenRow }) {
                           multiplier(c.roas)
                         ) : m.key === "budget" ? (
                           <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
+                        ) : m.key === "bidCap" ? (
+                          <BidCapCell bidCapMin={c.bidCapMin} bidCapMax={c.bidCapMax} bidCapSource={c.bidCapSource} />
                         ) : (
                           m.format(c[m.key], c)
                         )}

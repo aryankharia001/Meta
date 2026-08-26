@@ -33,16 +33,19 @@ import {
   PiggyBank,
   ShoppingBag,
   ExternalLink,
+  // Phase 39 — Campaign Activity History / Active Performance section icons.
+  Activity,
+  TrendingUp,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { fetchCampaignDetails, logActivity, fetchProfitCampaigns } from "../lib/api";
+import { fetchCampaignDetails, logActivity, fetchProfitCampaigns, fetchCampaignActivityTimeline } from "../lib/api";
 import { getCachedCampaignDetails, setCachedCampaignDetails } from "../lib/campaignDetailsCache";
 import { useCampaignDrawer } from "../lib/CampaignDrawerContext";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useOverlayEscape } from "../lib/overlayStack";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
 import { currency, number, percent, multiplier, formatDate, formatDateTime } from "../lib/format";
-import { statusBadgeClass, roasClass, formatBudget } from "../lib/campaignDisplay";
+import { statusBadgeClass, roasClass, formatBudget, formatBidCapAmount } from "../lib/campaignDisplay";
 import { LiveIndicator } from "./CampaignCells";
 import InfoModal from "./InfoModal";
 import OrdersListPopup from "./OrdersListPopup";
@@ -53,6 +56,16 @@ import OpenInMetaButton from "./OpenInMetaButton";
 // Phase 27 — Budget & Bid Cap Control section. New, additive import;
 // nothing above/below this line is touched.
 import BudgetBidControlSection from "./control/BudgetBidControlSection";
+// Phase 39 — Campaign Activity History, Active/Inactive Periods & Order
+// Attribution. New, additive imports; nothing above/below this line is
+// touched. Deliberately separate components from control/ActivityTimeline
+// (Phase 27's Budget/Bid Cap timeline, still used unmodified inside
+// BudgetBidControlSection above) — see campaignActivity/
+// CampaignActivityHistoryList.jsx's own header comment for why.
+import CampaignActivitySummaryCard from "./campaignActivity/CampaignActivitySummaryCard";
+import CampaignActivityHistoryList from "./campaignActivity/CampaignActivityHistoryList";
+import ActivePeriodsBar from "./campaignActivity/ActivePeriodsBar";
+import ActivePerformanceSection from "./campaignActivity/ActivePerformanceSection";
 import { recordRecentlyViewed } from "../lib/recentlyViewed";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
 import ColumnSettingsMenu from "./ColumnSettingsMenu";
@@ -258,6 +271,28 @@ function consolidatedCampaignBudget(campaign, adSets) {
   return { display: parts.length ? parts.join(" + ") : "N/A", source: "adsets" };
 }
 
+// Phase 38 — Consolidated Campaign Bid Cap. Companion to
+// consolidatedCampaignBudget() above, same fallback shape: a genuine
+// Campaign-level bid cap (details.campaign.bidAmount — Meta's Graph API
+// doesn't actually expose this on Campaign nodes today, see
+// campaignDisplay.js's bidCapApplicability comment, so this branch is
+// mostly future-proofing) always wins; otherwise this campaign's own Ad
+// Sets' bid caps (adSetExplorer.js's by-campaign endpoint now returns
+// bidAmount per ad set — see Phase 38) are rolled into a min/max. Equal
+// values render as one number, differing ones as an explicit range —
+// never a single invented value.
+function consolidatedCampaignBidCap(campaign, adSets) {
+  if (campaign && campaign.bidAmount !== null && campaign.bidAmount !== undefined) {
+    return { min: campaign.bidAmount, max: campaign.bidAmount, source: "campaign" };
+  }
+
+  const withBidCap = (adSets || []).filter((a) => a.bidAmount !== null && a.bidAmount !== undefined);
+  if (withBidCap.length === 0) return { min: null, max: null, source: "none" };
+
+  const values = withBidCap.map((a) => Number(a.bidAmount) || 0);
+  return { min: Math.min(...values), max: Math.max(...values), source: "adsets" };
+}
+
 export default function CampaignDrawer() {
   const { activeCampaign, closeCampaign } = useCampaignDrawer();
   const { openOrder } = useOrderDrawer();
@@ -331,6 +366,35 @@ export default function CampaignDrawer() {
     return loadCampaignProfit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCampaign?.tokenId, activeCampaign?.campaignId, activeCampaign?.accountId, activeCampaign?.since, activeCampaign?.until, details?.campaign?.accountId]);
+
+  // Phase 39 §5/§6 — Campaign Activity History (merged status/budget/
+  // bid-cap event timeline + reconstructed Active/Inactive periods +
+  // summary). Own state/effect, same "can't block or break the rest of
+  // the drawer" isolation as the Ad Sets/Profit fetches above. The
+  // order-attribution numbers (Active/Post-Campaign/Inactive orders &
+  // revenue, Primary ROAS) don't live here — they're already on
+  // `details.campaign` from the main details fetch — this effect only
+  // gets the event list + period boundaries the timeline/summary card
+  // need to render.
+  const [activityTimeline, setActivityTimeline] = useState(null); // { events, periods, summary }
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState("");
+  useEffect(() => {
+    if (!activeCampaign?.tokenId || !activeCampaign?.campaignId) return;
+    let cancelled = false;
+    setActivityLoading(true);
+    setActivityError("");
+    fetchCampaignActivityTimeline(activeCampaign.tokenId, activeCampaign.campaignId, {
+      since: activeCampaign.since,
+      until: activeCampaign.until,
+    })
+      .then((res) => !cancelled && setActivityTimeline(res))
+      .catch((err) => !cancelled && setActivityError(err.response?.data?.message || err.message || "Failed to load activity history"))
+      .finally(() => !cancelled && setActivityLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCampaign?.tokenId, activeCampaign?.campaignId, activeCampaign?.since, activeCampaign?.until]);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -451,6 +515,13 @@ export default function CampaignDrawer() {
     [details?.campaign, campaignAdSets]
   );
 
+  // Phase 38 — same recompute-on-latest-fetch reasoning as budgetInfo
+  // above.
+  const bidCapInfo = useMemo(
+    () => consolidatedCampaignBidCap(details?.campaign, campaignAdSets),
+    [details?.campaign, campaignAdSets]
+  );
+
   const kpiValues = useMemo(() => {
     if (!details) return null;
     const orders = details.orders || [];
@@ -468,7 +539,13 @@ export default function CampaignDrawer() {
     const cancelled = withDelivery.length ? countBy(["cancel"]) : null;
     const returned = withDelivery.length ? countBy(["return", "rto"]) : null;
 
-    const roas = spend ? revenue / spend : spend === 0 ? 0 : null;
+    // Phase 39 — the headline ROAS tile now shows Primary ROAS (active-period
+    // revenue ÷ active-period spend, see campaignActivity.js's
+    // computePrimaryRoas()) instead of spend-vs-every-matched-order ROAS, so
+    // orders that arrived after a campaign closed never inflate it. `spend`/
+    // `revenue` above stay full-range and unchanged — still used for AOV/CPO
+    // and the CSV export.
+    const roas = details.campaign?.primaryRoas ?? null;
     const aov = totalOrders ? revenue / totalOrders : 0;
     const cpo = spend != null && totalOrders ? spend / totalOrders : spend === 0 ? 0 : null;
 
@@ -844,6 +921,21 @@ export default function CampaignDrawer() {
                   value={budgetInfo.display}
                   caption={budgetInfo.source === "adsets" ? "Ad Set Budget Applied" : null}
                 />
+                {/* Phase 38 — Campaign Bid Cap Fallback to Ad Set, same
+                    "same field, small caption" convention as Campaign
+                    Budget just above — see consolidatedCampaignBidCap(). */}
+                <InfoBit
+                  icon={Gauge}
+                  label="Bid Cap"
+                  value={
+                    bidCapInfo.source === "none" || bidCapInfo.min === null
+                      ? "N/A"
+                      : bidCapInfo.max !== bidCapInfo.min
+                      ? `${formatBidCapAmount(bidCapInfo.min)}–${formatBidCapAmount(bidCapInfo.max)}`
+                      : formatBidCapAmount(bidCapInfo.min)
+                  }
+                  caption={bidCapInfo.source === "adsets" ? "Ad Set Bid Cap Applied" : null}
+                />
                 <InfoBit icon={Target} label="Objective" value={details.campaign.objective || "N/A"} />
                 <InfoBit icon={Tag} label="Buying Type" value={details.campaign.buyingType || "N/A"} />
                 <InfoBit icon={Building2} label="Ad Account" value={activeCampaign?.accountName || details.campaign.accountId || "N/A"} />
@@ -868,6 +960,30 @@ export default function CampaignDrawer() {
                   entityId={details.campaign.id}
                   tableIdSuffix="campaign"
                 />
+              </section>
+
+              {/* Phase 39 — Campaign Activity History: Active/Inactive
+                  Summary, reconstructed periods, and the full status +
+                  budget/bid-cap activity timeline. Purely additive —
+                  reads only the new GET /campaign-activity/:tokenId/
+                  :campaignId/timeline endpoint (see the activityTimeline
+                  effect above); nothing above or below this block is
+                  touched. */}
+              <section>
+                <SectionTitle icon={Activity}>Campaign Activity</SectionTitle>
+                <div className="card p-4 space-y-5">
+                  <CampaignActivitySummaryCard summary={activityTimeline?.summary} loading={activityLoading} error={activityError} />
+                  {activityTimeline?.summary?.available && (
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Active / Inactive Periods</div>
+                      <ActivePeriodsBar periods={activityTimeline?.periods} loading={activityLoading} error={activityError} />
+                    </div>
+                  )}
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Activity Timeline</div>
+                    <CampaignActivityHistoryList events={activityTimeline?.events} loading={activityLoading} error={activityError} />
+                  </div>
+                </div>
               </section>
 
               {/* KPIs */}
@@ -902,6 +1018,29 @@ export default function CampaignDrawer() {
                       </div>
                     </button>
                   ))}
+                </div>
+              </section>
+
+              {/* Phase 39 §17 — Active Performance / Post-Campaign / Inactive-
+                  Period order & revenue attribution, and the Primary ROAS
+                  (active-period revenue ÷ active-period spend). Purely
+                  additive — every figure here comes from the new fields
+                  campaigns.js's /:campaignId/details already returns on
+                  `details.campaign`; nothing above or below this block is
+                  touched. */}
+              <section>
+                <SectionTitle icon={TrendingUp}>Active Performance</SectionTitle>
+                <div className="card p-4">
+                  <ActivePerformanceSection
+                    campaign={details.campaign}
+                    spend={details.metaInsights?.spend ?? null}
+                    orders={details.orders || []}
+                    periods={activityTimeline?.periods}
+                    historicalDataAvailableFrom={activityTimeline?.summary?.historicalDataAvailableFrom}
+                    tokenId={activeCampaign.tokenId}
+                    since={activeCampaign.since}
+                    until={activeCampaign.until}
+                  />
                 </div>
               </section>
 

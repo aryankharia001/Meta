@@ -1,7 +1,7 @@
 import { X, Download, GitCompareArrows } from "lucide-react";
 import { currency, number, percent, multiplier } from "../../lib/format";
-import { formatBudget, roasClass } from "../../lib/campaignDisplay";
-import { BudgetCell } from "../CampaignCells";
+import { formatBudget, formatBidCapText, roasClass } from "../../lib/campaignDisplay";
+import { BudgetCell, BidCapCell } from "../CampaignCells";
 
 // Phase 8 — Campaign Comparison. A focused, read-only side-by-side view
 // of whatever campaigns are currently selected in ExplorerTable —
@@ -10,6 +10,7 @@ import { BudgetCell } from "../CampaignCells";
 
 const METRICS = [
   { key: "budget", label: "Budget", format: (v, c) => formatBudget(c?.budget, c?.budgetType) || "N/A" },
+  { key: "bidCap", label: "Bid Cap", format: (v, c) => formatBidCapText(c || {}) },
   { key: "spend", label: "Spend", format: currency },
   { key: "revenue", label: "Revenue", format: currency },
   // Phase 19 §4 — relabeled "Profit" → "Gross Profit" (Revenue − Ad
@@ -57,7 +58,7 @@ export default function ComparisonPanel({ campaigns, onClose }) {
   // spend-efficiency numbers are the win. Budget isn't a performance
   // metric (a bigger budget isn't "better"), so it's excluded entirely.
   const LOWER_IS_BETTER = new Set(["costPerOrder", "cpc", "cpm"]);
-  const NO_BEST = new Set(["budget"]);
+  const NO_BEST = new Set(["budget", "bidCap"]);
   const bestFor = (key) => {
     if (NO_BEST.has(key) || campaigns.length < 2) return null;
     const values = campaigns.map((c) => Number(c[key] || 0));
@@ -124,6 +125,8 @@ export default function ComparisonPanel({ campaigns, onClose }) {
                               ExplorerTable.jsx/LiveMonitoringSection.jsx. */}
                           {m.key === "budget" ? (
                             <BudgetCell budget={c.budget} budgetType={c.budgetType} budgetSource={c.budgetSource} />
+                          ) : m.key === "bidCap" ? (
+                            <BidCapCell bidCapMin={c.bidCapMin} bidCapMax={c.bidCapMax} bidCapSource={c.bidCapSource} />
                           ) : (
                             m.format(c[m.key], c)
                           )}

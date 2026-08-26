@@ -3,6 +3,14 @@ import MetaEntityState from "../models/MetaEntityState.js";
 import BudgetHistory from "../models/BudgetHistory.js";
 import BidCapHistory from "../models/BidCapHistory.js";
 import { recordActivity } from "../lib/activityLog.js";
+// Phase 39 — Campaign Activity History. Additive import only; nothing
+// below that pre-dates Phase 39 is changed by importing these two
+// functions. seedStatusHistoryBaseline()/recordStatusChange() are the
+// only two campaignActivity.js exports this file needs — see that
+// module's header for the full picture (period reconstruction, order
+// attribution, etc. all live there and are consumed by the route files
+// instead).
+import { seedStatusHistoryBaseline, recordStatusChange } from "../lib/campaignActivity.js";
 
 // ─────────────────────────────────────────────────────────────
 // Phase 27 — the single place that ever diffs a fresh Meta read against
@@ -22,6 +30,12 @@ import { recordActivity } from "../lib/activityLog.js";
 const CAMPAIGN_FIELDS = [
   "id", "name", "status", "effective_status",
   "daily_budget", "lifetime_budget", "bid_strategy",
+  // Phase 39 — real Meta-sourced creation timestamp, used only to
+  // decide whether the very first CampaignStatusHistory row for a
+  // newly-tracked campaign can honestly be labeled "Campaign Created"
+  // (see campaignActivity.js's seedStatusHistoryBaseline()). Never used
+  // for budget/bid/status diffing above.
+  "created_time",
 ].join(",");
 
 const ADSET_STATE_FIELDS = [
@@ -45,6 +59,10 @@ async function fetchLiveEntity(entityType, entityId, accessToken) {
     bidStrategy: meta.bid_strategy || "",
     status: meta.status || "",
     effectiveStatus: meta.effective_status || "",
+    // Phase 39 — only present when entityType is "campaign" (adsets
+    // don't request created_time above); null otherwise, exactly like
+    // every other optional field in this object.
+    createdTime: meta.created_time || null,
   };
 }
 
@@ -76,9 +94,31 @@ export async function reconcileEntity({ tokenId, accountId, entityType, entityId
 
   if (!prevState) {
     // First time we've ever seen this entity — establish the baseline,
-    // no history row (there's nothing to compare against, and we must
-    // never invent a fabricated "previous" value — spec §15).
+    // no BudgetHistory/BidCapHistory row (there's nothing to compare
+    // against, and we must never invent a fabricated "previous" value —
+    // spec §15).
     prevState = new MetaEntityState({ tokenId, accountId, entityType, entityId, name: live.name });
+
+    // Phase 39 §1/§3 — campaigns only: seed the one honest baseline
+    // CampaignStatusHistory row for this entity. Safe to do
+    // unconditionally here because this whole branch only runs the
+    // first time reconcileEntity ever sees this entityId (gated by the
+    // same "!prevState" check MetaEntityState's own baseline above is
+    // gated on) — whichever code path (this cron/control-route call, or
+    // routes/campaigns.js's/campaignExplorer.js's list-endpoint
+    // ensureBaseline()) observes the entity first is the only one that
+    // ever seeds it; the other backs off via its own MetaEntityState
+    // existence check.
+    if (entityType === "campaign") {
+      await seedStatusHistoryBaseline({
+        tokenId,
+        accountId,
+        entityId,
+        entityName: live.name,
+        effectiveStatus: live.effectiveStatus,
+        createdTime: live.createdTime,
+      }).catch((err) => console.error(`Campaign status history baseline failed for ${entityId}: ${err.message}`));
+    }
   } else {
     // Budget diff
     const prevBudget = prevState.budget;
@@ -142,7 +182,7 @@ export async function reconcileEntity({ tokenId, accountId, entityType, entityId
       }
     }
 
-    // Status diff — logged to the existing Activity Log only (spec §5's
+    // Status diff — logged to the existing Activity Log (spec §5's
     // "Campaign activated/paused" timeline events read from there).
     if (prevState.effectiveStatus && live.effectiveStatus && prevState.effectiveStatus !== live.effectiveStatus) {
       changes.status = { from: prevState.effectiveStatus, to: live.effectiveStatus };
@@ -154,6 +194,27 @@ export async function reconcileEntity({ tokenId, accountId, entityType, entityId
         entityId,
         meta: { from: prevState.effectiveStatus, to: live.effectiveStatus, source },
       });
+
+      // Phase 39 §1/§2/§13 — additionally record a structured
+      // CampaignStatusHistory row (campaign only) so Active/Inactive
+      // periods and order attribution can be reconstructed precisely.
+      // Purely additive alongside the recordActivity() call above,
+      // which is untouched. recordStatusChange() itself no-ops (writes
+      // nothing) when the normalized Active/Paused/Closed bucket didn't
+      // actually change (e.g. PENDING_REVIEW -> ACTIVE are both
+      // "active") — see campaignActivity.js.
+      if (entityType === "campaign") {
+        await recordStatusChange({
+          tokenId,
+          accountId,
+          entityId,
+          entityName: live.name || prevState.name,
+          previousStatus: prevState.effectiveStatus,
+          newStatus: live.effectiveStatus,
+          source,
+          changedBy,
+        }).catch((err) => console.error(`Campaign status history record failed for ${entityId}: ${err.message}`));
+      }
     }
   }
 

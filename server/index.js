@@ -44,6 +44,11 @@ import abandonedCartsRouter from "./routes/abandonedCarts.js";
 import campaignControlRouter from "./routes/campaignControl.js";
 import adsetControlRouter from "./routes/adsetControl.js";
 import startMetaEntitySyncCron from "./services/metaEntitySyncCron.js";
+// Phase 39 — Campaign Activity History, Active/Inactive Periods & Order
+// Attribution. Entirely new, additive route file; nothing above is
+// modified. Reads CampaignStatusHistory (also new) plus the existing
+// BudgetHistory/BidCapHistory — see routes/campaignActivity.js's header.
+import campaignActivityRouter from "./routes/campaignActivity.js";
 // Phase 25 — Store & Fetch Real Abandoned Cart Orders. Entirely new,
 // additive route file, mounted PUBLICLY (see below, before requireAuth)
 // since Traflead/Shiprocket Engage can't hold a login session cookie.
@@ -168,6 +173,8 @@ app.use("/api/abandoned-carts", abandonedCartsRouter);
 // touched or imported except read-only Token/AdAccount lookups.
 app.use("/api/campaign-control", campaignControlRouter);
 app.use("/api/adset-control", adsetControlRouter);
+// Phase 39 — additive only, alongside every route above.
+app.use("/api/campaign-activity", campaignActivityRouter);
 // Phase 33 — additive only, alongside every route above.
 app.use("/api/traflead-sync", trafleadSyncRouter);
 

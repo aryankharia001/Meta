@@ -4,8 +4,8 @@ import TrafleadAbandonedCartLead from "../models/TrafleadAbandonedCartLead.js";
 import { recordActivity } from "../lib/activityLog.js";
 import {
   getStoredTrafleadLeads,
+  getAbandonedCartLifecycleCohort,
   computeAbandonedCartSummary,
-  isDeliveredMatch,
   getAbandonedCartDailyBreakdown,
   backfillTrafleadRange,
   getBackfillState,
@@ -55,7 +55,41 @@ const router = express.Router();
 // background, by trafleadSyncCron.js's runShipmentPhoneMatchBatch — see
 // that file and trafleadSyncService.js's Phase 35 header comment for why
 // this never happens synchronously inside a request.
+//
+// Phase 40 — GET / and GET /daily now compute their summary/breakdown
+// from getAbandonedCartLifecycleCohort (the UNION of every lead with any
+// lifecycle event in range), not getStoredTrafleadLeads (leads CREATED
+// in range) — see trafleadSyncService.js's Phase 40 header comment. The
+// paginated record LIST this route also returns keeps reading
+// getStoredTrafleadLeads unchanged (spec's own §1 — lead fetching/
+// listing is untouched, only categorization changes). The
+// `deliveredLeads` array this endpoint used to embed for the Delivered
+// Revenue popup is gone — every drill-down (Created/CNF/Delivered/
+// Cancelled/Returned) now fetches on demand from the new GET /lifecycle
+// below, so a page load no longer pays for up to 1,000 leads' worth of
+// drill-down data it may never open.
 // ─────────────────────────────────────────────────────────────
+
+// Phase 40 — compact, honest "what happened when" string for the
+// drill-down's Lifecycle column (spec §17's "Status History"), built
+// ONLY from the dated fields actually set on this record, in
+// chronological order — never fabricated, never shows a stage that
+// hasn't actually happened yet.
+function formatLifecycleDate(d) {
+  return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "Asia/Kolkata" });
+}
+
+function buildLifecycleSummary(doc) {
+  const stages = [];
+  if (doc.orderDateIst) stages.push({ label: "Created", at: doc.trafleadCreatedAt || doc.orderDate, dateIst: doc.orderDateIst });
+  if (doc.confirmedAt) stages.push({ label: "CNF", at: doc.confirmedAt, dateIst: doc.confirmedDateIst });
+  if (doc.matchedDeliveredAt) stages.push({ label: "Delivered", at: doc.matchedDeliveredAt, dateIst: doc.matchedDeliveredDateIst });
+  if (doc.cancelledAt) stages.push({ label: "Cancelled", at: doc.cancelledAt, dateIst: doc.cancelledDateIst });
+  if (doc.returnedAt) stages.push({ label: "Returned", at: doc.returnedAt, dateIst: doc.returnedDateIst });
+
+  stages.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+  return stages.map((s) => `${s.label} ${formatLifecycleDate(s.at)}`).join(" → ");
+}
 
 function shape(doc) {
   return {
@@ -88,10 +122,22 @@ function shape(doc) {
     matchedAwbNumber: doc.matchedAwbNumber,
     matchedCourierName: doc.matchedCourierName,
     matchedDeliveredAt: doc.matchedDeliveredAt,
+    matchedDeliveredDateIst: doc.matchedDeliveredDateIst,
+    matchedShipmentStatusChangedAt: doc.matchedShipmentStatusChangedAt,
     matchMethod: doc.matchMethod,
     matchedCandidateCount: doc.matchedCandidateCount,
     shipmentLookupCheckedAt: doc.shipmentLookupCheckedAt,
     shipmentLookupError: doc.shipmentLookupError,
+
+    // Phase 40 — lifecycle event dates (see TrafleadAbandonedCartLead.js's
+    // Phase 40 header comment for how each is sourced/kept sticky).
+    confirmedAt: doc.confirmedAt,
+    confirmedDateIst: doc.confirmedDateIst,
+    cancelledAt: doc.cancelledAt,
+    cancelledDateIst: doc.cancelledDateIst,
+    returnedAt: doc.returnedAt,
+    returnedDateIst: doc.returnedDateIst,
+    lifecycleSummary: buildLifecycleSummary(doc),
 
     fullName: doc.fullName,
     phone: doc.phone,
@@ -171,26 +217,20 @@ router.get("/", async (req, res) => {
       });
     }
 
-    const [settings, rangeLeads] = await Promise.all([
+    // Phase 40 — the paginated record LIST keeps reading
+    // getStoredTrafleadLeads (orders CREATED in range, unchanged), while
+    // the summary reads the wider lifecycle cohort (orders with ANY
+    // event in range) — see this file's Phase 40 header comment.
+    const [settings, listCohort, lifecycleCohort] = await Promise.all([
       getOrCreateAbandonedCartSettings(),
-      getStoredTrafleadLeads(since, until),
+      search ? getStoredTrafleadLeads(since, until, { search }) : getStoredTrafleadLeads(since, until),
+      getAbandonedCartLifecycleCohort(since, until),
     ]);
-    const summary = computeAbandonedCartSummary(rangeLeads, settings);
-    // Phase 35 — deliveredLeads is just the SAME cohort filtered down,
-    // not a second Mongo query (there's only one dataset now — see the
-    // header comment).
-    const deliveredLeads = rangeLeads.filter((l) => isDeliveredMatch(l));
+    const summary = computeAbandonedCartSummary(lifecycleCohort, settings, since, until);
 
-    const listLeads = search ? await getStoredTrafleadLeads(since, until, { search }) : rangeLeads;
-    const total = listLeads.length;
+    const total = listCohort.length;
     const start = (page - 1) * pageSize;
-    const docs = listLeads.slice(start, start + pageSize);
-
-    // Delivered Revenue drill-down data — capped defensively so a huge
-    // range can't blow up the response; the popup itself narrows the
-    // date range if it needs to see more than this.
-    const DELIVERED_DRILLDOWN_CAP = 1000;
-    const deliveredLeadsForDrilldown = deliveredLeads.slice(0, DELIVERED_DRILLDOWN_CAP);
+    const docs = listCohort.slice(start, start + pageSize);
 
     res.json({
       success: true,
@@ -200,8 +240,6 @@ router.get("/", async (req, res) => {
       pageSize,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
       summary,
-      deliveredLeads: deliveredLeadsForDrilldown.map(shape),
-      deliveredLeadsTruncated: deliveredLeads.length > DELIVERED_DRILLDOWN_CAP,
       sync: getBackfillState(),
     });
   } catch (err) {
@@ -210,10 +248,77 @@ router.get("/", async (req, res) => {
   }
 });
 
+// GET /api/abandoned-carts/lifecycle?since=&until=&event=created|cnf|delivered|cancelled|returned
+//
+// Phase 40 — powers every Abandoned Cart drill-down popup (summary card,
+// Daily table, Dashboard), for all 5 lifecycle events, replacing the old
+// pattern of embedding a capped `deliveredLeads` array in every GET /
+// response whether or not the popup was ever opened. Computes the exact
+// same lifecycle cohort GET / uses for its summary, filters to the one
+// event+date-field the caller asked for, and returns the matching leads
+// (shaped, capped defensively — the popup itself narrows the date range
+// if it needs to see more than this).
+const LIFECYCLE_EVENT_DATE_FIELDS = {
+  created: "orderDateIst",
+  cnf: "confirmedDateIst",
+  delivered: "matchedDeliveredDateIst",
+  cancelled: "cancelledDateIst",
+  returned: "returnedDateIst",
+};
+
+router.get("/lifecycle", async (req, res) => {
+  try {
+    const { since, until, event } = req.query;
+    if (!since || !until) {
+      return res.status(400).json({ success: false, message: "since and until are required (YYYY-MM-DD)" });
+    }
+    const dateField = LIFECYCLE_EVENT_DATE_FIELDS[event];
+    if (!dateField) {
+      return res.status(400).json({
+        success: false,
+        message: `event must be one of: ${Object.keys(LIFECYCLE_EVENT_DATE_FIELDS).join(", ")}`,
+      });
+    }
+
+    const [settings, cohort] = await Promise.all([getOrCreateAbandonedCartSettings(), getAbandonedCartLifecycleCohort(since, until)]);
+    const matching = cohort.filter((l) => l[dateField] && l[dateField] >= since && l[dateField] <= until);
+
+    const LIFECYCLE_DRILLDOWN_CAP = 1000;
+    const truncated = matching.length > LIFECYCLE_DRILLDOWN_CAP;
+    const leads = matching.slice(0, LIFECYCLE_DRILLDOWN_CAP).map(shape);
+
+    const revenueContext =
+      event === "cnf"
+        ? (() => {
+            const rate = Math.min(100, Math.max(0, Number(settings.cnfRevenueRate ?? 50) || 0));
+            const potentialRevenue = matching.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
+            const avgOrderValue = matching.length ? potentialRevenue / matching.length : 0;
+            const revenueCountedCount = Math.round(matching.length * (rate / 100));
+            return { cnfRevenueRate: rate, cnfRevenueCountedCount: revenueCountedCount, cnfRevenue: avgOrderValue * revenueCountedCount };
+          })()
+        : {};
+
+    res.json({
+      success: true,
+      event,
+      since,
+      until,
+      count: matching.length,
+      leads,
+      truncated,
+      ...revenueContext,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // GET /api/abandoned-carts/daily?since=&until= — per-IST-day breakdown
-// for the Daily tab: Leads (order-date cohort) alongside Delivered /
-// Delivered Revenue (delivered-date, any order date) for that same day.
-// Same non-blocking catch-up sync as GET / above.
+// for the Daily tab: Created/CNF/Delivered/Cancelled/Returned, each
+// bucketed by the day THAT event actually happened (Phase 40 — see
+// getAbandonedCartDailyBreakdown's own header comment), plus per-day CNF
+// revenue. Same non-blocking catch-up sync as GET / above.
 router.get("/daily", async (req, res) => {
   try {
     const { since, until } = req.query;

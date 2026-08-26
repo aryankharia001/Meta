@@ -684,20 +684,25 @@ export async function fetchExpenseBreakdown({ since, until } = {}) {
 // Phase 35 — revenue source changed AGAIN: now phone-matched-shipment-
 // status based, attributed to the SELECTED date range (never a delivery
 // date) — see trafleadSyncService.js's Phase 35 header comment and
-// computeAbandonedCartSummary. fetchAbandonedCarts's `summary` now has
+// computeAbandonedCartSummary. fetchAbandonedCarts's `summary` has
 // orders/matched/unmatched/deliveredCount/notDeliveredMatched/
 // potentialRevenue/deliveredRevenue/profit — expectedDelivered/
 // recognizedRevenue/netContribution/deliveryRate are kept as aliases of
 // deliveredCount/deliveredRevenue/profit/(deliveredCount÷orders) for any
-// old reader. The response also still includes `deliveredLeads`
-// (shipment-matched-and-delivered rows for the Delivered Revenue
-// drill-down) and `deliveredLeadsTruncated`. Each record now also
-// carries matchedShipmentFound/matchedShipmentStatus/matchedOrderId/
-// matchedAwbNumber/matchMethod/matchedCandidateCount/
-// shipmentLookupCheckedAt (the phone-match result) alongside the
-// untouched shipmentStatus/deliveredDateIst fields (that SAME lead's own
-// embedded shipment sub-doc, from Phase 34 — no longer what drives
-// revenue, but still synced and available for reference).
+// old reader. Each record also carries matchedShipmentFound/
+// matchedShipmentStatus/matchedOrderId/matchedAwbNumber/matchMethod/
+// matchedCandidateCount/shipmentLookupCheckedAt (the phone-match result)
+// alongside the untouched shipmentStatus/deliveredDateIst fields (that
+// SAME lead's own embedded shipment sub-doc, from Phase 34 — no longer
+// what drives revenue, but still synced and available for reference).
+//
+// Phase 40 — `summary` is now built from a WIDER lifecycle cohort (any
+// lead with an event in range, not just leads created in range) and adds
+// cancelledCount/returnedCount; cnfLeadsCount/deliveredCount are now
+// genuinely dated by their own CNF/delivery date. The response no longer
+// embeds a `deliveredLeads` drill-down array at all — every drill-down
+// (Created/CNF/Delivered/Cancelled/Returned) now fetches on demand via
+// fetchAbandonedCartLifecycleEvents below (see AbandonedCartEventPopup).
 //
 // fetchAbandonedCarts accepts { since, until, search, page, pageSize }
 // (all optional except since/until, plain YYYY-MM-DD strings). The
@@ -706,17 +711,29 @@ export async function fetchExpenseBreakdown({ since, until } = {}) {
 // server-side-paginated table.
 export async function fetchAbandonedCarts(params = {}) {
   const { data } = await api.get("/abandoned-carts", { params });
-  return data; // { success, records, total, page, pageSize, totalPages, summary, deliveredLeads, deliveredLeadsTruncated, sync }
+  return data; // { success, records, total, page, pageSize, totalPages, summary, sync }
 }
 export async function fetchAbandonedCart(id) {
   const { data } = await api.get(`/abandoned-carts/${id}`);
   return data; // { success, record }
 }
-// Phase 34 — per-IST-day { date, leads, delivered, deliveredRevenue }
-// for the Daily tab's Abandoned Cart table.
+// Phase 40 — per-IST-day { date, created, cnf, delivered, cancelled,
+// returned, cnfRevenueRate, cnfRevenueCountedCount, cnfRevenue,
+// deliveredRevenue }, each bucketed by the date THAT event actually
+// happened — for the Daily tab's Abandoned Cart table.
 export async function fetchAbandonedCartsDaily({ since, until }) {
   const { data } = await api.get("/abandoned-carts/daily", { params: { since, until } });
   return data; // { success, days, sync }
+}
+// Phase 40 — powers every Abandoned Cart drill-down popup
+// (AbandonedCartEventPopup): the actual order records behind one
+// lifecycle event ("created" | "cnf" | "delivered" | "cancelled" |
+// "returned") within [since, until], dated by that event's own date
+// field — never orderDateIst for all of them. See
+// server/routes/abandonedCarts.js's GET /lifecycle.
+export async function fetchAbandonedCartLifecycleEvents({ since, until, event }) {
+  const { data } = await api.get("/abandoned-carts/lifecycle", { params: { since, until, event } });
+  return data; // { success, event, since, until, count, leads, truncated, [cnfRevenueRate, cnfRevenueCountedCount, cnfRevenue] }
 }
 // Phase 33 — payload must be { notes }. Every other field is
 // Traflead-sourced and read-only from this app's point of view.
@@ -892,4 +909,22 @@ export async function fetchChangeCompare(tokenId, level, entityId, { changeId, t
 // exposed under its own name so call sites read as an explicit user action.
 export async function syncEntityNow(tokenId, level, entityId) {
   return level === "adset" ? fetchAdSetCurrent(tokenId, entityId) : fetchCampaignCurrent(tokenId, entityId);
+}
+
+// ─── Phase 39 — Campaign Activity History, Active/Inactive Periods ────
+// New, additive route at /api/campaign-activity — never touches
+// fetchEntityHistory (Phase 27's Budget/Bid Cap timeline) above or any
+// other existing endpoint. The order-attribution fields (Active/Post-
+// Campaign/Inactive orders & revenue, primaryRoas, activeDays/Hours,
+// etc.) are NOT fetched separately here — they arrive as additive
+// fields already on the campaign objects fetchLiveCampaigns/
+// fetchCampaignDetails/fetchCampaignExplorer already return (see those
+// endpoints' server-side changes). This is only for the drawer's
+// dedicated Activity History timeline + period breakdown.
+export async function fetchCampaignActivityTimeline(tokenId, campaignId, { since, until } = {}) {
+  const params = {};
+  if (since) params.since = since;
+  if (until) params.until = until;
+  const { data } = await api.get(`/campaign-activity/${tokenId}/${campaignId}/timeline`, { params });
+  return data; // { success, events, periods, summary }
 }

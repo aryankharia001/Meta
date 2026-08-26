@@ -1,5 +1,5 @@
 import CampaignLink from "./CampaignLink";
-import { isCampaignLive, isLiveStatus, roasClass, statusBadgeClass, formatBudget } from "../lib/campaignDisplay";
+import { isCampaignLive, isLiveStatus, roasClass, statusBadgeClass, formatBudget, formatBidCapAmount } from "../lib/campaignDisplay";
 import { multiplier } from "../lib/format";
 
 // ────────────────────────────────────────────────────────────────
@@ -57,6 +57,30 @@ export function BudgetCell({ budget, budgetType, budgetSource }) {
     <div className="budget-cell">
       <strong>{amount}</strong> {rest.join(" ")}
       {budgetSource === "adsets" && <div className="text-[10px] font-normal text-slate-400 mt-0.5">Ad Set Budget Applied</div>}
+    </div>
+  );
+}
+
+// Phase 38 — Campaign Bid Cap Fallback to Ad Set. Companion to
+// BudgetCell above, same contract shape. A genuine Campaign-level bid
+// cap (bidCapSource: "campaign") renders as a plain value with no
+// caption. When the campaign has none, the value shown is rolled up
+// from its Ad Sets' own bid caps (bidCapMin/bidCapMax — Meta's Graph
+// API only ever exposes bid_amount on Ad Sets, never Campaigns, so this
+// is the only path most campaigns will ever take): equal min/max
+// renders as one number, differing values render as an explicit
+// min–max range so nothing invents a single number that isn't real.
+// Never shows "N/A" when Ad Set bid caps exist — only when neither the
+// Campaign nor any of its Ad Sets have one (bidCapSource: "none").
+export function BidCapCell({ bidCapMin, bidCapMax, bidCapSource }) {
+  if (bidCapSource !== "campaign" && bidCapSource !== "adsets") return <span className="budget-cell text-slate-300">—</span>;
+  if (bidCapMin === null || bidCapMin === undefined) return <span className="budget-cell text-slate-300">—</span>;
+  const isRange = bidCapMax !== null && bidCapMax !== undefined && bidCapMax !== bidCapMin;
+  const display = isRange ? `${formatBidCapAmount(bidCapMin)}–${formatBidCapAmount(bidCapMax)}` : formatBidCapAmount(bidCapMin);
+  return (
+    <div className="budget-cell">
+      <strong>{display}</strong>
+      {bidCapSource === "adsets" && <div className="text-[10px] font-normal text-slate-400 mt-0.5">Ad Set Bid Cap Applied</div>}
     </div>
   );
 }

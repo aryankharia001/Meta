@@ -110,6 +110,76 @@ const trafleadAbandonedCartLeadSchema = new mongoose.Schema(
     shipmentLookupCheckedAt: { type: Date, default: null, index: true },
     shipmentLookupError: { type: String, trim: true, default: "" },
 
+    // ── Phase 40 — Abandoned Cart Lifecycle Date Attribution ──
+    //
+    // Every event below is dated by when it ACTUALLY happened (per real
+    // Traflead data), never by orderDateIst — see
+    // trafleadSyncService.js's Phase 40 header comment for the full
+    // rationale and exactly which Traflead field each is sourced from.
+    // All four *At fields are written STICKY (first-observed-wins, via
+    // MongoDB's $min on the write path) so a later status change on the
+    // same lead can never silently erase an earlier lifecycle date —
+    // that erasure is exactly the bug this phase exists to fix. The
+    // companion *DateIst string is the lexicographically-comparable
+    // "YYYY-MM-DD" form every other date field in this app already uses
+    // for $gte/$lte range queries — written in lockstep with its *At
+    // Date via the same $min, so the two can never disagree about which
+    // is earlier.
+    //
+    // confirmedAt/confirmedDateIst — first time this lead was observed
+    // with status "confirmed" (Traflead's own literal value — "CNF" is
+    // just the spec's shorthand, see isCnfLead()). Sourced from
+    // lastStatusChange at that sync — Traflead's own real transition
+    // timestamp, not invented. Drives every CNF-revenue calculation as
+    // of Phase 40 (previously orderDateIst drove it — the Phase 40 bug).
+    confirmedAt: { type: Date, default: null },
+    confirmedDateIst: { type: String, trim: true, default: null, index: true },
+
+    // cancelledAt/cancelledDateIst — ONE unified field for either path
+    // the spec's own lifecycle diagram shows ("Created → Cancelled" as a
+    // direct alternative to "Created → Confirmed", i.e. a pre-shipment
+    // lead-level cancellation) OR a post-confirmation shipment
+    // cancellation (matched shipment bucket "cancelled" — see
+    // bucketShipmentStatus). Whichever timestamp is earliest wins (sticky
+    // $min across both possible sources, applied wherever each is
+    // observed — normalizeLead for the lead-level case,
+    // resolveShipmentMatchForLead for the shipment-level case).
+    cancelledAt: { type: Date, default: null },
+    cancelledDateIst: { type: String, trim: true, default: null, index: true },
+
+    // returnedAt/returnedDateIst — first time the PHONE-MATCHED shipment
+    // (see the matched* fields above — Phase 35) was observed in the
+    // "returned" bucket (rto_initiated/rto_in_transit/rto_out_for_delivery/
+    // rto_failed/rto_delivered/rto_shortage/reverse_delivered/
+    // reverse_closed). Sourced from matchedShipmentStatusChangedAt below.
+    // No lead-level equivalent — Returned is purely a shipment-lifecycle
+    // event (spec's own "Created → Confirmed → Returned" diagram).
+    returnedAt: { type: Date, default: null },
+    returnedDateIst: { type: String, trim: true, default: null, index: true },
+
+    // matchedDeliveredDateIst — companion IST-string to the existing
+    // matchedDeliveredAt (Phase 35), added so Delivered can be
+    // range-filtered by *actual delivery date* the same way as every
+    // other lifecycle event (Phase 34/35/37 only ever used
+    // matchedDeliveredAt for display/attribution-to-selected-range, never
+    // for range-filtering the delivery event itself — that's the Phase 40
+    // fix). No stickiness needed — shipment.deliveredAt is Traflead's own
+    // stable, one-time field; it doesn't change once set.
+    matchedDeliveredDateIst: { type: String, trim: true, default: null, index: true },
+
+    // matchedShipmentStatusChangedAt — general-purpose "best real
+    // timestamp available for when the phone-matched shipment reached
+    // its CURRENT literal matchedShipmentStatus." Resolved (see
+    // trafleadSyncService.js's resolveShipmentStatusTimestamp) in
+    // priority order: (1) the most recent matching entry in that
+    // candidate's own shipment.trackingHistory for its current status —
+    // real per-status courier-tracking timestamps Traflead already
+    // collects but this app never parsed before Phase 40 — (2)
+    // shipment.lastTrackedAt, (3) the candidate document's own
+    // updatedAt. Feeds cancelledAt (shipment-level case) and returnedAt
+    // above via their sticky $min writes. Not itself range-queried.
+    matchedShipmentStatusChangedAt: { type: Date, default: null },
+
     // ── Customer ──
     fullName: { type: String, trim: true, default: "" },
     phone: { type: String, trim: true, default: "", index: true },
@@ -201,6 +271,15 @@ trafleadAbandonedCartLeadSchema.index({ campaign: 1, sub1: 1 });
 // Phase 35 — runShipmentPhoneMatchBatch's candidate-selection query:
 // "not yet resolved to delivered, oldest-checked-first".
 trafleadAbandonedCartLeadSchema.index({ matchedShipmentStatus: 1, shipmentLookupCheckedAt: 1 });
+
+// Phase 40 — getAbandonedCartLifecycleCohort's $or query (one lead
+// matches if ANY lifecycle event falls in the selected range) hits each
+// of these five single-field indexes independently; Mongo unions the
+// index scans for an $or of single-field-indexed clauses, so this is
+// deliberately five separate indexes rather than one compound index
+// (orderDateIst's is already declared above; confirmed/cancelled/
+// returned/matchedDeliveredDateIst each get `index: true` on their own
+// field declaration).
 
 export default mongoose.models.TrafleadAbandonedCartLead ||
   mongoose.model("TrafleadAbandonedCartLead", trafleadAbandonedCartLeadSchema);

@@ -2,6 +2,12 @@ import express from "express";
 import ShiprocketOrder from "../models/shiprocketorder.js";
 import Token from "../models/Token.js";
 import AdAccount from "../models/AdAccount.js";
+// Phase 39 — Campaign Activity History, Active/Inactive Periods & Order
+// Attribution. Additive import only, same helpers routes/campaigns.js's
+// /compare now also uses — see campaignActivity.js's header. Duplicated
+// import here (not re-exported from campaigns.js) per this file's own
+// "zero coupling to earlier/sibling phases" convention stated above.
+import { ensureBaselinesBulk, getActivitySnapshotsBulk, classifyOrders, computePrimaryRoas, statusBucket } from "../lib/campaignActivity.js";
 
 const router = express.Router();
 
@@ -163,6 +169,19 @@ function deriveBudget(meta) {
   return { budget: null, budgetType: null };
 }
 
+// Phase 38 — Campaign Bid Cap Fallback to Ad Set, identical convention
+// to deriveBudget() above and its copies in campaigns.js/dailyReports.js.
+// Meta's Graph API never actually returns bid_amount on a Campaign node
+// (only on Ad Sets), so this only ever reads it where present — a safe
+// no-op today, kept generic in case Meta's own API surface changes.
+function deriveBidCap(meta) {
+  if (!meta) return null;
+  if (meta.bid_amount !== undefined && meta.bid_amount !== null && meta.bid_amount !== "") {
+    return Number(meta.bid_amount) / 100;
+  }
+  return null;
+}
+
 // Six buckets instead of analyticsUtils.js's five — Phase 8 explicitly
 // asks for "Processing" split out from "Pending", so this local copy
 // diverges from the client-side deliveryBucket() on purpose.
@@ -248,6 +267,18 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
 
   const metaByCampaignId = new Map(); // campaignId -> { meta, insights, accountId }
 
+  // Phase 38 — Campaign Budget/Bid Cap Fallback to Ad Set. Mirrors the
+  // convention campaigns.js's /compare route already established (Phase
+  // 36 §4): when a campaign's own Meta-reported budget and/or bid cap is
+  // missing, bulk-fetch this account's ad sets once and roll their own
+  // budgets/bid caps up into the campaign — never invented, never
+  // touching spend/revenue/ROAS/matching. Only ever fetched for accounts
+  // that actually have a campaign missing one of these two fields, so
+  // accounts where every campaign already has both pay zero extra Graph
+  // API cost.
+  const adSetBudgetByCampaignId = new Map(); // campaignId -> { dailyTotal, lifetimeTotal, hasDaily, hasLifetime }
+  const adSetBidCapByCampaignId = new Map(); // campaignId -> { min, max }
+
   for (const accountId of accountIds) {
     const actId = accountId.startsWith("act_") ? accountId : `act_${accountId}`;
 
@@ -276,6 +307,72 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       });
     });
 
+    // Phase 39 §4 — bounded auto-tracking: seed a Campaign Activity
+    // History baseline for any campaign in this account not tracked
+    // yet. DB-only (reuses metaList, already fetched above — no extra
+    // Meta call), a no-op once tracked. Never blocks/fails the response
+    // if it errors — Activity History is additive, not load-bearing for
+    // this route's existing fields.
+    await ensureBaselinesBulk({
+      tokenId: String(token._id),
+      accountId,
+      campaigns: metaList.map((c) => ({
+        entityId: String(c.id || ""),
+        entityName: c.name || "",
+        status: c.status || null,
+        effectiveStatus: c.effective_status || null,
+        createdTime: c.created_time || null,
+      })),
+    }).catch((err) => console.log(`Campaign activity baseline seeding failed for ${actId}: ${err.message}`));
+
+    // Phase 38 — only bother fetching this account's ad sets when at
+    // least one of its campaigns has no genuine campaign-level budget
+    // and/or no genuine campaign-level bid cap.
+    const campaignIdsNeedingAdSetData = metaList
+      .filter((c) => !deriveBudget(c).budget || deriveBidCap(c) === null)
+      .map((c) => String(c.id));
+    if (campaignIdsNeedingAdSetData.length > 0) {
+      const missingSet = new Set(campaignIdsNeedingAdSetData);
+      try {
+        const adsetList = await fetchAllPages(
+          `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget,bid_amount")}&limit=500&access_token=${token.accessToken}`
+        );
+        adsetList.forEach((a) => {
+          const cid = String(a.campaign_id || "");
+          // Only campaigns actually missing their own budget/bid cap
+          // need a rollup — never overrides a genuine campaign-level
+          // value.
+          if (!cid || !missingSet.has(cid)) return;
+          const { budget: adsetBudget, budgetType: adsetBudgetType } = deriveBudget(a);
+          if (adsetBudget !== null) {
+            const entry = adSetBudgetByCampaignId.get(cid) || {
+              dailyTotal: 0,
+              lifetimeTotal: 0,
+              hasDaily: false,
+              hasLifetime: false,
+            };
+            if (adsetBudgetType === "daily") {
+              entry.dailyTotal += adsetBudget;
+              entry.hasDaily = true;
+            } else if (adsetBudgetType === "lifetime") {
+              entry.lifetimeTotal += adsetBudget;
+              entry.hasLifetime = true;
+            }
+            adSetBudgetByCampaignId.set(cid, entry);
+          }
+          const adsetBidCap = deriveBidCap(a);
+          if (adsetBidCap !== null) {
+            const bc = adSetBidCapByCampaignId.get(cid) || { min: adsetBidCap, max: adsetBidCap };
+            bc.min = Math.min(bc.min, adsetBidCap);
+            bc.max = Math.max(bc.max, adsetBidCap);
+            adSetBidCapByCampaignId.set(cid, bc);
+          }
+        });
+      } catch (err) {
+        console.log(`Explorer ad set budget/bid cap fallback fetch failed for ${actId}: ${err.message}`);
+      }
+    }
+
     (insightsData.data || []).forEach((row) => {
       const id = String(row.campaign_id || "");
       if (!id) return;
@@ -288,6 +385,15 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       metaByCampaignId.set(id, existing);
     });
   }
+
+  // Phase 39 — Campaign Activity snapshots for every campaign about to
+  // be returned. ONE bulk query for the whole page, same "bulk, not
+  // per-item" principle the Ad Set budget/bid-cap fallback above
+  // already established.
+  const activitySnapshots = await getActivitySnapshotsBulk({
+    tokenId: String(token._id),
+    entityIds: [...metaByCampaignId.keys()],
+  });
 
   // Orders in range, enriched enough for delivery/product/city/state
   // breakdowns — same field selection Phase 2/3/6 already use.
@@ -386,7 +492,52 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
 
     const profit = revenue - spend;
     const roas = spend ? revenue / spend : 0;
-    const { budget, budgetType } = deriveBudget(meta);
+
+    // Phase 38 — Campaign Budget/Bid Cap Fallback to Ad Set (see the
+    // bulk ad-set fetch above). A genuine campaign-level value always
+    // wins; *Source tells the client which one it's looking at so the
+    // UI can show a small "Ad Set ... Applied" note without inventing a
+    // second field. Never shows "N/A" when an Ad Set-level value can be
+    // used instead — only when neither the campaign nor its Ad Sets
+    // have one.
+    let { budget, budgetType } = deriveBudget(meta);
+    let budgetSource = budget !== null && budget !== undefined ? "campaign" : "none";
+    if (budgetSource === "none") {
+      const sum = adSetBudgetByCampaignId.get(campaignId);
+      if (sum && (sum.hasDaily || sum.hasLifetime)) {
+        if (sum.hasDaily) {
+          budget = sum.dailyTotal;
+          budgetType = "daily";
+        } else {
+          budget = sum.lifetimeTotal;
+          budgetType = "lifetime";
+        }
+        budgetSource = "adsets";
+      }
+    }
+
+    const campaignBidCap = deriveBidCap(meta);
+    let bidCapMin = campaignBidCap !== null ? campaignBidCap : null;
+    let bidCapMax = bidCapMin;
+    let bidCapSource = bidCapMin !== null ? "campaign" : "none";
+    if (bidCapSource === "none") {
+      const bc = adSetBidCapByCampaignId.get(campaignId);
+      if (bc) {
+        bidCapMin = bc.min;
+        bidCapMax = bc.max;
+        bidCapSource = "adsets";
+      }
+    }
+
+    // Phase 39 §7/§9/§15 — Campaign Activity attribution, same
+    // classifyOrders()/computePrimaryRoas() helpers routes/campaigns.js's
+    // /compare now also uses, over this row's own already-matched
+    // campaignOrders (nothing re-matched) and its own already-fetched
+    // `spend` (already active-period spend by construction — see
+    // campaignActivity.js's computePrimaryRoas() header).
+    const activitySnapshot = activitySnapshots.get(campaignId) || null;
+    const attribution = classifyOrders(campaignOrders, activitySnapshot);
+    const primaryRoas = computePrimaryRoas(attribution.active.revenue, spend);
 
     return {
       campaignId,
@@ -399,11 +550,39 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       buyingType: meta.buying_type || null,
       budget,
       budgetType,
+      budgetSource,
+      bidCapMin,
+      bidCapMax,
+      bidCapSource,
       startTime,
       stopTime,
       createdTime: meta.created_time || null,
       updatedTime: meta.updated_time || null,
       lastOrderAt: lastOrderAt ? lastOrderAt.toISOString() : null,
+
+      // Phase 39 §15 — Campaign Activity column group. `roas` below
+      // (spend ÷ ALL matched-order revenue in range) stays exactly as
+      // every existing caller of this endpoint already reads it;
+      // `primaryRoas` is the new active-period-only figure.
+      activityTrackingAvailable: !!activitySnapshot?.available,
+      activityStatus: activitySnapshot?.currentBucket || statusBucket(meta.effective_status || meta.status),
+      activeDays: activitySnapshot?.activeDays ?? null,
+      activeHours: activitySnapshot?.activeHours ?? null,
+      inactiveDays: activitySnapshot?.inactiveDays ?? null,
+      inactiveHours: activitySnapshot?.inactiveHours ?? null,
+      activePeriodsCount: activitySnapshot?.activePeriods ?? null,
+      inactivePeriodsCount: activitySnapshot?.inactivePeriods ?? null,
+      campaignStart: activitySnapshot?.campaignStart || null,
+      campaignEnd: activitySnapshot?.campaignEnd || null,
+      activePeriodOrders: attribution.active.orders,
+      activePeriodRevenue: attribution.active.revenue,
+      inactivePeriodOrders: attribution.inactivePaused.orders,
+      inactivePeriodRevenue: attribution.inactivePaused.revenue,
+      postCampaignOrders: attribution.postCampaign.orders,
+      postCampaignRevenue: attribution.postCampaign.revenue,
+      historicalUnavailableOrders: attribution.historicalUnavailable.orders,
+      historicalUnavailableRevenue: attribution.historicalUnavailable.revenue,
+      primaryRoas,
 
       spend, reach, impressions, clicks, ctr, cpc, cpm,
       purchases, purchaseValue,

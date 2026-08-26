@@ -3,7 +3,7 @@ import { X, AlertTriangle, RefreshCw, Inbox, Search, Download, ChevronDown, Chev
 import { fetchDailyDetail, fetchAdSetsByCampaign } from "../../lib/api";
 import { currency, number, multiplier, formatDateTime } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
-import { formatBudget, roasClass } from "../../lib/campaignDisplay";
+import { formatBudget, formatBidCapText, roasClass } from "../../lib/campaignDisplay";
 import { downloadCsv } from "../../lib/csv";
 import { useOrderDrawer } from "../../lib/OrderDrawerContext";
 // Phase 13 §12 — optional Ad Set/Hourly hierarchy for this exact
@@ -153,6 +153,13 @@ export default function DailyDrawer({ meta, onClose }) {
                     label="Budget"
                     value={formatBudget(data.metrics.budget, data.metrics.budgetType) || "N/A"}
                     caption={data.metrics.budgetSource === "adsets" ? "Ad Set Budget Applied" : null}
+                  />
+                  {/* Phase 38 — Campaign Bid Cap Fallback to Ad Set, same
+                      pattern as Budget just above. */}
+                  <Stat
+                    label="Bid Cap"
+                    value={formatBidCapText(data.metrics)}
+                    caption={data.metrics.bidCapSource === "adsets" ? "Ad Set Bid Cap Applied" : null}
                   />
                   <Stat label="Spend" value={currency(data.metrics.spend)} />
                   <Stat label="Orders" value={number(data.metrics.orders)} />

@@ -107,6 +107,19 @@ function deriveBudget(meta) {
   return { budget: null, budgetType: null };
 }
 
+// Phase 38 — Campaign Bid Cap Fallback to Ad Set, identical convention
+// to deriveBudget() above and its copies in campaigns.js/
+// campaignExplorer.js. Meta's Graph API never actually returns
+// bid_amount on a Campaign node (only on Ad Sets), so this only ever
+// reads it where present — a safe no-op today.
+function deriveBidCap(meta) {
+  if (!meta) return null;
+  if (meta.bid_amount !== undefined && meta.bid_amount !== null && meta.bid_amount !== "") {
+    return Number(meta.bid_amount) / 100;
+  }
+  return null;
+}
+
 function extractDeliveryStatus(raw) {
   return (
     raw?.shipment_status ||
@@ -196,7 +209,7 @@ function enumerateDays(since, until) {
   return days;
 }
 
-function buildRow({ date, campaignId, campaignName, accountId, accountName, status, effectiveStatus, budget = null, budgetType = null, budgetSource = "none", spend, orders, isUnmatched = false }) {
+function buildRow({ date, campaignId, campaignName, accountId, accountName, status, effectiveStatus, budget = null, budgetType = null, budgetSource = "none", bidCapMin = null, bidCapMax = null, bidCapSource = "none", spend, orders, isUnmatched = false }) {
   const totalOrders = orders.length;
   const revenue = orders.reduce((s, o) => s + Number(o.totalAmountPayable || 0), 0);
   let codOrders = 0,
@@ -236,6 +249,9 @@ function buildRow({ date, campaignId, campaignName, accountId, accountName, stat
     budget,
     budgetType,
     budgetSource,
+    bidCapMin,
+    bidCapMax,
+    bidCapSource,
     isUnmatched,
 
     spend: Math.round(spendNum * 100) / 100,
@@ -367,6 +383,7 @@ router.get("/:tokenId", async (req, res) => {
 
       metaList.forEach((c) => {
         const { budget, budgetType } = deriveBudget(c);
+        const bidCap = deriveBidCap(c);
         campaignMeta.set(String(c.id), {
           name: c.name,
           accountId,
@@ -376,36 +393,51 @@ router.get("/:tokenId", async (req, res) => {
           budget,
           budgetType,
           budgetSource: budget !== null ? "campaign" : "none",
+          bidCapMin: bidCap,
+          bidCapMax: bidCap,
+          bidCapSource: bidCap !== null ? "campaign" : "none",
         });
       });
 
-      // Phase 36 §4 — Campaign Budget Fallback, same approach as
-      // campaigns.js's /compare: only bother fetching this account's ad
-      // sets when at least one of its campaigns has no genuine
-      // campaign-level budget, and only ever fall back for those specific
-      // campaigns — a real campaign-level budget above is never replaced.
-      const idsMissingBudget = metaList.filter((c) => !deriveBudget(c).budget).map((c) => String(c.id));
-      if (idsMissingBudget.length > 0) {
-        const missingSet = new Set(idsMissingBudget);
+      // Phase 36 §4 / Phase 38 — Campaign Budget/Bid Cap Fallback, same
+      // approach as campaigns.js's /compare: only bother fetching this
+      // account's ad sets when at least one of its campaigns has no
+      // genuine campaign-level budget and/or no genuine campaign-level
+      // bid cap, and only ever fall back for those specific campaigns —
+      // a real campaign-level value above is never replaced.
+      const idsMissingBudgetOrBidCap = metaList
+        .filter((c) => !deriveBudget(c).budget || deriveBidCap(c) === null)
+        .map((c) => String(c.id));
+      if (idsMissingBudgetOrBidCap.length > 0) {
+        const missingSet = new Set(idsMissingBudgetOrBidCap);
         try {
           const adsetList = await fetchAllPages(
-            `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget")}&limit=500&access_token=${token.accessToken}`
+            `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget,bid_amount")}&limit=500&access_token=${token.accessToken}`
           );
           const sumByCampaignId = new Map();
+          const bidCapByCampaignId = new Map();
           adsetList.forEach((a) => {
             const cid = String(a.campaign_id || "");
             if (!cid || !missingSet.has(cid)) return;
             const { budget: adsetBudget, budgetType: adsetBudgetType } = deriveBudget(a);
-            if (adsetBudget === null) return;
-            const entry = sumByCampaignId.get(cid) || { dailyTotal: 0, lifetimeTotal: 0, hasDaily: false, hasLifetime: false };
-            if (adsetBudgetType === "daily") {
-              entry.dailyTotal += adsetBudget;
-              entry.hasDaily = true;
-            } else if (adsetBudgetType === "lifetime") {
-              entry.lifetimeTotal += adsetBudget;
-              entry.hasLifetime = true;
+            if (adsetBudget !== null) {
+              const entry = sumByCampaignId.get(cid) || { dailyTotal: 0, lifetimeTotal: 0, hasDaily: false, hasLifetime: false };
+              if (adsetBudgetType === "daily") {
+                entry.dailyTotal += adsetBudget;
+                entry.hasDaily = true;
+              } else if (adsetBudgetType === "lifetime") {
+                entry.lifetimeTotal += adsetBudget;
+                entry.hasLifetime = true;
+              }
+              sumByCampaignId.set(cid, entry);
             }
-            sumByCampaignId.set(cid, entry);
+            const adsetBidCap = deriveBidCap(a);
+            if (adsetBidCap !== null) {
+              const bc = bidCapByCampaignId.get(cid) || { min: adsetBidCap, max: adsetBidCap };
+              bc.min = Math.min(bc.min, adsetBidCap);
+              bc.max = Math.max(bc.max, adsetBidCap);
+              bidCapByCampaignId.set(cid, bc);
+            }
           });
           sumByCampaignId.forEach((sum, cid) => {
             const entry = campaignMeta.get(cid);
@@ -421,8 +453,15 @@ router.get("/:tokenId", async (req, res) => {
             }
             entry.budgetSource = "adsets";
           });
+          bidCapByCampaignId.forEach((bc, cid) => {
+            const entry = campaignMeta.get(cid);
+            if (!entry) return;
+            entry.bidCapMin = bc.min;
+            entry.bidCapMax = bc.max;
+            entry.bidCapSource = "adsets";
+          });
         } catch (err) {
-          console.log(`Ad set budget fallback fetch failed for ${actId}: ${err.message}`);
+          console.log(`Ad set budget/bid cap fallback fetch failed for ${actId}: ${err.message}`);
         }
       }
 
@@ -506,6 +545,9 @@ router.get("/:tokenId", async (req, res) => {
             budget: meta.budget,
             budgetType: meta.budgetType,
             budgetSource: meta.budgetSource || "none",
+            bidCapMin: meta.bidCapMin ?? null,
+            bidCapMax: meta.bidCapMax ?? null,
+            bidCapSource: meta.bidCapSource || "none",
             spend: insightsByDayCampaign.get(`${date}|${campaignId}`) || 0,
             orders: campaignOrders,
           })
@@ -578,6 +620,9 @@ router.get("/:tokenId/detail", async (req, res) => {
     let budget = null;
     let budgetType = null;
     let budgetSource = "none";
+    let bidCapMin = null;
+    let bidCapMax = null;
+    let bidCapSource = "none";
     if (!isUnmatched) {
       for (const acc of candidateAccountIds) {
         const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
@@ -609,6 +654,12 @@ router.get("/:tokenId/detail", async (req, res) => {
           if (hit) {
             ({ budget, budgetType } = deriveBudget(hit));
             if (budget !== null) budgetSource = "campaign";
+            const hitBidCap = deriveBidCap(hit);
+            if (hitBidCap !== null) {
+              bidCapMin = hitBidCap;
+              bidCapMax = hitBidCap;
+              bidCapSource = "campaign";
+            }
             break;
           }
         } catch (err) {
@@ -616,39 +667,51 @@ router.get("/:tokenId/detail", async (req, res) => {
         }
       }
 
-      // Phase 36 §4 — Campaign Budget Fallback: no genuine campaign-level
-      // budget found above (Advantage+/CBO-off) — fall back to the sum of
-      // THIS campaign's own Ad Set budgets, one bulk /adsets call per
-      // candidate account, same convention as /:tokenId above and
-      // campaigns.js's /compare.
-      if (budget === null) {
+      // Phase 36 §4 / Phase 38 — Campaign Budget/Bid Cap Fallback: no
+      // genuine campaign-level budget and/or bid cap found above
+      // (Advantage+/CBO-off) — fall back to THIS campaign's own Ad Sets'
+      // budgets/bid caps, one bulk /adsets call per candidate account,
+      // same convention as /:tokenId above and campaigns.js's /compare.
+      if (budget === null || bidCapSource === "none") {
         for (const acc of candidateAccountIds) {
           const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
           try {
             const adsetList = await fetchAllPages(
-              `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget")}&limit=500&access_token=${token.accessToken}`
+              `https://graph.facebook.com/v19.0/${actId}/adsets?fields=${encodeURIComponent("id,campaign_id,daily_budget,lifetime_budget,bid_amount")}&limit=500&access_token=${token.accessToken}`
             );
             let dailyTotal = 0, lifetimeTotal = 0, hasDaily = false, hasLifetime = false;
+            let bcMin = null, bcMax = null;
             adsetList.forEach((a) => {
               if (String(a.campaign_id || "") !== String(campaignId)) return;
               const { budget: adsetBudget, budgetType: adsetBudgetType } = deriveBudget(a);
-              if (adsetBudget === null) return;
-              if (adsetBudgetType === "daily") {
-                dailyTotal += adsetBudget;
-                hasDaily = true;
-              } else if (adsetBudgetType === "lifetime") {
-                lifetimeTotal += adsetBudget;
-                hasLifetime = true;
+              if (adsetBudget !== null) {
+                if (adsetBudgetType === "daily") {
+                  dailyTotal += adsetBudget;
+                  hasDaily = true;
+                } else if (adsetBudgetType === "lifetime") {
+                  lifetimeTotal += adsetBudget;
+                  hasLifetime = true;
+                }
+              }
+              const adsetBidCap = deriveBidCap(a);
+              if (adsetBidCap !== null) {
+                bcMin = bcMin === null ? adsetBidCap : Math.min(bcMin, adsetBidCap);
+                bcMax = bcMax === null ? adsetBidCap : Math.max(bcMax, adsetBidCap);
               }
             });
-            if (hasDaily || hasLifetime) {
+            if (budget === null && (hasDaily || hasLifetime)) {
               budget = hasDaily ? dailyTotal : lifetimeTotal;
               budgetType = hasDaily ? "daily" : "lifetime";
               budgetSource = "adsets";
-              break;
             }
+            if (bidCapSource === "none" && bcMin !== null) {
+              bidCapMin = bcMin;
+              bidCapMax = bcMax;
+              bidCapSource = "adsets";
+            }
+            if (budget !== null && bidCapSource !== "none") break;
           } catch (err) {
-            console.log(`Daily detail ad set budget fallback fetch failed for ${actId}: ${err.message}`);
+            console.log(`Daily detail ad set budget/bid cap fallback fetch failed for ${actId}: ${err.message}`);
           }
         }
       }
@@ -694,6 +757,9 @@ router.get("/:tokenId/detail", async (req, res) => {
       budget,
       budgetType,
       budgetSource,
+      bidCapMin,
+      bidCapMax,
+      bidCapSource,
       spend,
       orders: matchingOrders,
       isUnmatched,

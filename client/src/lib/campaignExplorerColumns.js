@@ -1,6 +1,7 @@
-import { currency, number, percent, multiplier, formatDate } from "./format";
+import { currency, number, percent, multiplier, formatDate, formatDateTime } from "./format";
 import { computeCampaignHealth } from "./campaignHealth";
-import { formatBudget } from "./campaignDisplay";
+import { formatBudget, formatBidCapText } from "./campaignDisplay";
+import { activityBucketInfo, formatDaysHours } from "./campaignActivityDisplay";
 
 // Phase 8 — Campaign Explorer's ~35 column definitions, grouped exactly
 // as the spec lists them (Campaign Information / Meta Performance /
@@ -33,6 +34,17 @@ export const COLUMN_GROUPS = [
         defaultWidth: 140,
         align: "right",
         render: (c) => formatBudget(c.budget, c.budgetType) || "N/A",
+      },
+      {
+        key: "bidCap",
+        label: "Bid Cap",
+        defaultWidth: 140,
+        align: "right",
+        // Phase 38 — plain-text (CSV export reuses this render()); the
+        // live table renders the richer BidCapCell JSX instead, same
+        // "shared render() for CSV, JSX for the table" split the Budget
+        // column above already uses.
+        render: (c) => formatBidCapText(c),
       },
       { key: "objective", label: "Objective", defaultWidth: 140, render: (c) => c.objective || "N/A" },
       { key: "status", label: "Status", defaultWidth: 120, align: "center", render: (c) => c.effectiveStatus || c.status || "N/A" },
@@ -110,6 +122,45 @@ export const COLUMN_GROUPS = [
       { key: "returningCustomers", label: "Returning Customers", defaultWidth: 150, align: "right", render: (c) => number(c.returningCustomers) },
     ],
   },
+  // Phase 39 §15 — Campaign Activity History & correct ROAS attribution.
+  // Purely additive group appended at the end so the existing ~35 columns
+  // and their widths/order are untouched. Every value here comes straight
+  // off the additive fields campaignExplorer.js's fetchCombinedCampaigns()
+  // already attaches to each campaign row (activityStatus, activeDays/
+  // Hours, primaryRoas, ...) — nothing here recomputes anything. Most of
+  // these are hidden by default (see DEFAULT_HIDDEN below) to keep the
+  // main table clean per the spec; the detailed breakdown always lives in
+  // the Campaign Drawer's "Campaign Activity" / "Active Performance"
+  // sections regardless of which of these columns are shown here.
+  {
+    group: "Campaign Activity",
+    columns: [
+      {
+        key: "activityStatus",
+        label: "Current Status",
+        defaultWidth: 120,
+        align: "center",
+        render: (c) => (c.activityTrackingAvailable ? activityBucketInfo(c.activityStatus).label : "N/A"),
+      },
+      { key: "activeDays", label: "Active Days", defaultWidth: 110, align: "right", render: (c) => number(c.activeDays) },
+      { key: "activeHours", label: "Active Hours", defaultWidth: 110, align: "right", render: (c) => number(c.activeHours) },
+      { key: "inactiveDays", label: "Inactive Days", defaultWidth: 110, align: "right", render: (c) => number(c.inactiveDays) },
+      { key: "inactiveHours", label: "Inactive Hours", defaultWidth: 120, align: "right", render: (c) => number(c.inactiveHours) },
+      { key: "campaignStart", label: "Campaign Start", defaultWidth: 160, render: (c) => (c.campaignStart ? formatDateTime(c.campaignStart) : "N/A") },
+      { key: "campaignEnd", label: "Campaign End", defaultWidth: 160, render: (c) => (c.campaignEnd ? formatDateTime(c.campaignEnd) : "Ongoing") },
+      { key: "activePeriodOrders", label: "Active-Period Orders", defaultWidth: 150, align: "right", render: (c) => number(c.activePeriodOrders) },
+      { key: "activePeriodRevenue", label: "Active-Period Revenue", defaultWidth: 160, align: "right", render: (c) => currency(c.activePeriodRevenue) },
+      { key: "postCampaignOrders", label: "Post-Campaign Orders", defaultWidth: 150, align: "right", render: (c) => number(c.postCampaignOrders) },
+      { key: "postCampaignRevenue", label: "Post-Campaign Revenue", defaultWidth: 160, align: "right", render: (c) => currency(c.postCampaignRevenue) },
+      {
+        key: "primaryRoas",
+        label: "Primary ROAS",
+        defaultWidth: 120,
+        align: "right",
+        render: (c) => (c.primaryRoas === null || c.primaryRoas === undefined ? "N/A" : multiplier(c.primaryRoas)),
+      },
+    ],
+  },
 ];
 
 export const ALL_COLUMNS = COLUMN_GROUPS.flatMap((g) => g.columns.map((c) => ({ ...c, group: g.group })));
@@ -118,4 +169,11 @@ export const DEFAULT_HIDDEN = new Set([
   "unmatchedOrders", "outsideRangeOrders", "revenuePerOrder", "purchases", "purchaseValue",
   "codRevenue", "prepaidRevenue", "processing", "returned", "rto",
   "totalProductsSold", "totalUnitsSold",
+  // Phase 39 — keep the main Explorer table clean (spec §15); Current
+  // Status and Primary ROAS stay visible by default, the rest of the
+  // Campaign Activity group is one click away via the existing column
+  // settings menu.
+  "activeDays", "activeHours", "inactiveDays", "inactiveHours",
+  "campaignStart", "campaignEnd",
+  "activePeriodOrders", "activePeriodRevenue", "postCampaignOrders", "postCampaignRevenue",
 ]);

@@ -323,6 +323,18 @@ function ViewDetailsModal({ id, onClose }) {
               <Field label="Created (Traflead)" value={formatDateTime(record.trafleadCreatedAt)} />
               <Field label="Updated (Traflead)" value={formatDateTime(record.trafleadUpdatedAt)} />
               <Field label="Status" value={<StatusBadge status={record.status} />} raw />
+              {/* Phase 40 — lifecycle event dates, each the ACTUAL date that
+                  event happened (never the Abandoned Cart creation date).
+                  Only shown once that event has actually occurred. */}
+              {record.confirmedDateIst && <Field label="CNF Date" value={record.confirmedDateIst} />}
+              {record.matchedDeliveredDateIst && <Field label="Delivered Date" value={record.matchedDeliveredDateIst} />}
+              {record.cancelledDateIst && <Field label="Cancelled Date" value={record.cancelledDateIst} />}
+              {record.returnedDateIst && <Field label="Returned Date" value={record.returnedDateIst} />}
+              {record.lifecycleSummary && (
+                <div className="col-span-2 sm:col-span-3">
+                  <Field label="Lifecycle" value={record.lifecycleSummary} />
+                </div>
+              )}
               {/* Phase 36 §1 — reads through the same shared helpers the
                   main table uses (see lib/shipmentStatus.js) so this modal
                   can never show a different status/match interpretation

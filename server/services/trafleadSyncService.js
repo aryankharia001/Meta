@@ -1,6 +1,7 @@
 import axios from "axios";
 import TrafleadAbandonedCartLead from "../models/TrafleadAbandonedCartLead.js";
 import TrafleadSyncLog from "../models/TrafleadSyncLog.js";
+import { getOrCreateAbandonedCartSettings } from "../models/AbandonedCartSettings.js";
 import { todayIstIso, istDayStartUtc, istDayEndUtc, toIstDateString } from "../utils/dateIst.js";
 
 // ═════════════════════════════════════════════════════════════
@@ -165,6 +166,45 @@ import { todayIstIso, istDayStartUtc, istDayEndUtc, toIstDateString } from "../u
 // (matchedShipmentStatus/matchedShipmentFound/etc. on this same Mongo
 // document) — never a live Traflead call from a GET /api/abandoned-carts
 // request.
+//
+// ─── Phase 40 — Abandoned Cart Lifecycle Date Attribution + CNF Revenue ───
+//
+// Fixes the last remaining bug in the chain above: every stat (Created/
+// CNF/Delivered/Cancelled/Returned/revenue) for a selected date range was
+// still being computed from ONE cohort — leads whose orderDateIst falls in
+// range — no matter which lifecycle event was being counted. An order
+// created Aug 1 but confirmed Aug 2 showed its CNF revenue on Aug 1, not
+// Aug 2. This phase makes every event belong to the date it ACTUALLY
+// happened, using real Traflead timestamps only (verified against
+// trafleadcrm's own source, not guessed):
+//
+//   - Traflead's Lead.status transition history is NOT available to this
+//     credential-free sync (the real audit trail — a `StatusHistory`
+//     collection — sits behind authenticated-only routes; see the Phase 35
+//     header comment above for why Meta deliberately has no Traflead
+//     credentials). The only transition timestamp the public
+//     /api/leads-by-offer endpoint exposes is `lastStatusChange` — set by
+//     Traflead whenever `status` changes — a single most-recent-transition
+//     snapshot, not a full history. Real data, just limited.
+//
+//   - Traflead's shipment status, by contrast, DOES carry a real per-status
+//     timeline: `Lead.shipment.trackingHistory` (`[{status, timestamp,
+//     ...}]`, confirmed by reading trafleadcrm/src/models/Lead.js), already
+//     present in the same unfiltered Lead documents this sync fetches but
+//     never parsed before this phase.
+//
+// Because `lastStatusChange` only reflects the CURRENT status, naively
+// re-deriving "CNF date" from "status is currently confirmed" on every read
+// would silently erase the historical fact that an order WAS confirmed on
+// some earlier date the moment it later gets cancelled — exactly the class
+// of bug this phase exists to fix. So confirmedAt/cancelledAt/returnedAt
+// (see TrafleadAbandonedCartLead.js's Phase 40 header comment) are written
+// STICKY — first-observed-wins, via MongoDB's $min update operator — never
+// overwritten by a later sync no matter how the lead's current status goes
+// on to change. isCnfLead()/isDeliveredMatch() (current-status snapshots)
+// are kept for display/back-compat but are no longer what revenue or the
+// Daily/Dashboard breakdown are computed from — see
+// getAbandonedCartLifecycleCohort/computeAbandonedCartSummary below.
 // ═════════════════════════════════════════════════════════════
 
 const TRAFLEAD_API_BASE_URL = (process.env.TRAFLEAD_API_BASE_URL || "https://vedrahacrm.traffakpay.com").replace(/\/+$/, "");
@@ -374,6 +414,48 @@ async function searchTrafleadLeadsByPhone(phoneDigits) {
 //      ambiguous case (>1 eligible candidate) stays visible in the
 //      drill-down rather than silently resolved.
 // Returns null if no eligible (phone-matched + shipped) candidate exists.
+// Phase 40 — the best REAL timestamp available for "when did this
+// shipment reach its current literal status." Priority order:
+//   1. The most recent entry in shipment.trackingHistory whose own
+//      `status` matches the shipment's current `status` — real
+//      per-status courier-tracking timestamps Traflead's shipment
+//      integration already records (confirmed by reading
+//      trafleadcrm/src/models/Lead.js's shipment.trackingHistory
+//      sub-schema), just never parsed by this sync before now.
+//   2. shipment.lastTrackedAt — the last time Traflead's own courier
+//      polling touched this shipment at all, a coarser but still real
+//      fallback for when trackingHistory is empty/doesn't have a
+//      matching entry.
+//   3. The candidate Lead document's own `updatedAt` — last resort, a
+//      real Mongo timestamp, just not shipment-specific.
+// Returns null (never a fabricated "now") if none of the above exist.
+function resolveShipmentStatusTimestamp(shipment, candidateUpdatedAt) {
+  const status = String(shipment?.status || "").trim().toLowerCase();
+  const history = Array.isArray(shipment?.trackingHistory) ? shipment.trackingHistory : [];
+
+  if (status && history.length > 0) {
+    const matches = history
+      .filter((h) => String(h?.status || "").trim().toLowerCase() === status && h?.timestamp)
+      .map((h) => new Date(h.timestamp))
+      .filter((d) => !isNaN(d.getTime()));
+    if (matches.length > 0) {
+      return new Date(Math.max(...matches.map((d) => d.getTime())));
+    }
+  }
+
+  if (shipment?.lastTrackedAt) {
+    const d = new Date(shipment.lastTrackedAt);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  if (candidateUpdatedAt) {
+    const d = new Date(candidateUpdatedAt);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  return null;
+}
+
 function pickBestShipmentMatch(candidates, targetPhoneDigits, targetOrderId, targetExternalOrderId) {
   const eligible = candidates.filter((raw) => {
     const shipment = raw.shipment || {};
@@ -416,13 +498,32 @@ function pickBestShipmentMatch(candidates, targetPhoneDigits, targetOrderId, tar
     awbNumber: shipment.awbNumber || "",
     courierName: shipment.courierName || "",
     deliveredAt: shipment.deliveredAt ? new Date(shipment.deliveredAt) : null,
+    // Phase 40 — see resolveShipmentStatusTimestamp above.
+    statusChangedAt: resolveShipmentStatusTimestamp(shipment, chosen.updatedAt),
   };
+}
+
+// Phase 40 — sticky-earliest write for a Date/DateIst field pair on an
+// already-loaded Mongoose document (the plain-JS equivalent of the $min
+// bulkWrite trick used elsewhere in this file for the lead-level
+// confirmedAt/cancelledAt — this path already has the full document
+// loaded via resolveShipmentMatchForLead's .save(), so there's no need
+// for a second query). No-op if `candidateDate` is null, or if the field
+// is already set to something earlier.
+function applyStickyEarliest(doc, atField, dateIstField, candidateDate) {
+  if (!candidateDate) return;
+  const existing = doc[atField];
+  if (existing && new Date(existing).getTime() <= candidateDate.getTime()) return;
+  doc[atField] = candidateDate;
+  doc[dateIstField] = toIstDateString(candidateDate);
 }
 
 // Resolves (and persists) the phone-based shipment match for ONE
 // Abandoned Cart lead. Never touches this document's own order fields —
 // only the matched* / shipmentLookupCheckedAt / shipmentLookupError
-// fields Phase 35 added.
+// fields Phase 35 added, plus (Phase 40) the shipment-driven lifecycle
+// dates (matchedDeliveredDateIst/returnedAt/returnedDateIst, and
+// cancelledAt/cancelledDateIst for the shipment-level cancellation case).
 export async function resolveShipmentMatchForLead(doc) {
   const phoneDigits = normalizeIndianPhone(doc.phone);
   const now = new Date();
@@ -460,6 +561,24 @@ export async function resolveShipmentMatchForLead(doc) {
       doc.matchedCourierName = match.courierName;
       doc.matchedDeliveredAt = match.deliveredAt;
       doc.matchedCandidateCount = match.candidateCount;
+
+      // Phase 40 — Delivered date-filtering companion to matchedDeliveredAt.
+      // Direct assignment (no stickiness needed): shipment.deliveredAt is
+      // Traflead's own stable, one-time field.
+      doc.matchedDeliveredDateIst = match.deliveredAt ? toIstDateString(match.deliveredAt) : null;
+      doc.matchedShipmentStatusChangedAt = match.statusChangedAt || null;
+
+      // Phase 40 — Cancelled/Returned are dated STICKY-earliest (see
+      // applyStickyEarliest above) from the best real timestamp available
+      // for this matched shipment's current status, bucketed the exact
+      // same way the UI already displays shipment status groups (see
+      // bucketShipmentStatus — never a second, differently-drawn line).
+      const bucket = bucketShipmentStatus(match.status);
+      if (bucket === "cancelled") {
+        applyStickyEarliest(doc, "cancelledAt", "cancelledDateIst", match.statusChangedAt);
+      } else if (bucket === "returned") {
+        applyStickyEarliest(doc, "returnedAt", "returnedDateIst", match.statusChangedAt);
+      }
     }
     doc.shipmentLookupError = "";
   } catch (err) {
@@ -648,6 +767,30 @@ function normalizeLead(raw, offerMeta) {
   };
 }
 
+// Phase 40 — the $min-only candidate fields for THIS sync of a lead-level
+// status (confirmed/cancelled), kept OUT of normalizeLead's `fields`
+// ($set-able) on purpose — see the Phase 40 header comment above for why
+// these must never be unconditionally overwritten. Returns {} (no $min
+// clause needed) when the lead's current status is neither confirmed nor
+// cancelled this sync, or lastStatusChange isn't available to date it
+// from. `fields` is the already-normalized object normalizeLead()
+// returned for this same lead.
+function computeStickyLifecycleFields(fields) {
+  const min = {};
+  const status = String(fields.status || "").trim().toLowerCase();
+  const changedAt = fields.lastStatusChange;
+  if (!status || !changedAt) return min;
+
+  if (status === "confirmed") {
+    min.confirmedAt = changedAt;
+    min.confirmedDateIst = toIstDateString(changedAt);
+  } else if (status === "cancelled") {
+    min.cancelledAt = changedAt;
+    min.cancelledDateIst = toIstDateString(changedAt);
+  }
+  return min;
+}
+
 // ─── WRITE PATH — talks to Traflead, upserts into Mongo ─────────────
 
 async function syncDayWithRetry(day, { maxRetries = 3, baseDelayMs = 2000 } = {}) {
@@ -680,10 +823,17 @@ async function syncDayWithRetry(day, { maxRetries = 3, baseDelayMs = 2000 } = {}
           .map((raw) => {
             const fields = normalizeLead(raw, { offerName, offerId: raw.offer ? String(raw.offer) : "" });
             if (!fields.trafleadLeadId) return null;
+            // Phase 40 — confirmedAt/cancelledAt (lead-level) are written
+            // via $min, never $set, so a later status change can never
+            // overwrite an already-recorded lifecycle date. See
+            // computeStickyLifecycleFields's own header comment.
+            const minFields = computeStickyLifecycleFields(fields);
+            const update = { $set: fields };
+            if (Object.keys(minFields).length > 0) update.$min = minFields;
             return {
               updateOne: {
                 filter: { trafleadLeadId: fields.trafleadLeadId },
-                update: { $set: fields },
+                update,
                 upsert: true,
               },
             };
@@ -940,6 +1090,34 @@ export async function getStoredTrafleadLeads(since, until, filters = {}) {
   return TrafleadAbandonedCartLead.find(query).sort({ trafleadCreatedAt: -1 }).lean();
 }
 
+// Phase 40 — the dataset computeAbandonedCartSummary/
+// getAbandonedCartDailyBreakdown bucket in memory: the UNION of every
+// lead with AT LEAST ONE lifecycle event (created/confirmed/delivered/
+// cancelled/returned) inside [since, until] — a superset of
+// getStoredTrafleadLeads's plain orderDateIst cohort, deliberately,
+// because an order can be CREATED outside the selected range but still
+// have (say) its CNF or Delivered event fall inside it (the whole point
+// of this phase). getStoredTrafleadLeads itself is untouched and still
+// used wherever "orders placed in this period" is the actual question
+// (the management page's own paginated list, and the
+// matched/unmatched/pendingVerification shipment-verification stats
+// below, which are deliberately scoped to orders placed in range, not
+// to this wider union).
+export async function getAbandonedCartLifecycleCohort(since, until) {
+  const range = { $gte: since, $lte: until };
+  return TrafleadAbandonedCartLead.find({
+    $or: [
+      { orderDateIst: range },
+      { confirmedDateIst: range },
+      { matchedDeliveredDateIst: range },
+      { cancelledDateIst: range },
+      { returnedDateIst: range },
+    ],
+  })
+    .sort({ trafleadCreatedAt: -1 })
+    .lean();
+}
+
 // ─── Phase 35 — selected-date revenue from phone-matched shipment status ──
 //
 // isDeliveredMatch: the ONLY revenue predicate as of Phase 35. Checks the
@@ -964,99 +1142,93 @@ export function isCnfLead(lead) {
 }
 
 /**
- * Phase 35 — the entire Abandoned Cart summary for a date range, built
- * from ONE dataset: the order-date cohort (cohortLeads — leads whose
- * orderDateIst falls in [since, until], fetched exactly as before via
- * getStoredTrafleadLeads — completely unchanged mechanism). There is no
- * second, delivered-date-filtered dataset anymore — Phase 35's whole
- * point is that revenue belongs to the SELECTED date range, not to
- * whenever the matched shipment happened to be delivered.
+ * Phase 40 — the entire Abandoned Cart summary for a date range, built
+ * from the LIFECYCLE cohort (cohortLeads — the UNION returned by
+ * getAbandonedCartLifecycleCohort(since, until): every lead with at
+ * least one lifecycle event in range, not just leads CREATED in range).
+ * `since`/`until` are passed through so each event type can be bucketed
+ * from its OWN date field independently — this is what actually fixes
+ * the Phase 40 bug: an order created Aug 1 but confirmed Aug 2 now shows
+ * its CNF (and CNF revenue) on Aug 2, not Aug 1, and does NOT re-appear
+ * as a second CNF event if it's later delivered on Aug 3.
  *
- * `orders` — every Abandoned Cart order in the selected range.
- * `matched` — of those, how many have a phone-matched shipment at all
- *   (matchedShipmentFound), regardless of its status.
- * `unmatched` — orders - matched (no shipment found for that phone at
- *   all — shown in the drill-down as "Shipment: Not Found").
- * `deliveredCount` — of the MATCHED orders, how many currently read
- *   "delivered". As of Phase 37 this is INFORMATIONAL ONLY (shipment
- *   verification, still fully computed and shown) — it no longer drives
- *   revenue/expenses/profit; see cnfRevenue below for what does.
- * `notDeliveredMatched` — matched - deliveredCount (matched to a real
- *   shipment, but that shipment isn't Delivered yet/anymore).
- * `deliveredRevenue` — sum of `total` for exactly the deliveredCount
- *   orders. Also informational only as of Phase 37.
+ *   createdLeads   — cohortLeads whose orderDateIst falls in range. The
+ *                    "orders placed this period" cohort — unchanged
+ *                    meaning from every prior phase.
+ *   confirmedLeads — cohortLeads whose confirmedDateIst falls in range
+ *                    (sticky first-observed date — see
+ *                    TrafleadAbandonedCartLead.js's Phase 40 header
+ *                    comment). THIS is the CNF revenue cohort as of
+ *                    Phase 40 — previously it was createdLeads filtered
+ *                    by isCnfLead() (current status), which is exactly
+ *                    the bug this phase fixes.
+ *   deliveredLeads — cohortLeads whose matchedDeliveredDateIst falls in
+ *                    range — genuinely delivery-date-based now (Phase
+ *                    34-37 only ever used the phone-matched shipment's
+ *                    delivered flag against the CREATED-date cohort).
+ *   cancelledLeads — cohortLeads whose cancelledDateIst falls in range
+ *                    (new — covers both a pre-shipment lead-level
+ *                    cancellation and a post-confirmation shipment
+ *                    cancellation, whichever happened).
+ *   returnedLeads  — cohortLeads whose returnedDateIst falls in range
+ *                    (new — RTO/reverse-delivery shipment events).
  *
- * Phase 37 — Abandoned Cart CNF-Based Revenue. Revenue recognition moves
- * OFF shipment-delivery status entirely and onto the lead's own Traflead
- * `status` reaching "confirmed" (CNF), combined with a manual, explicit,
- * settings-configurable percentage — because CNF is available immediately
- * on every lead (no phone-matched-shipment lookup required, no waiting on
- * a courier), at the cost of being an assumption rather than a verified
- * delivery. The spec is explicit that this is a deliberate trade-off:
- * "the CNF percentage is an assumption for revenue calculation only —
- * never change the actual Total Orders or CNF Lead count because of the
- * percentage."
+ * matched/unmatched/pendingVerification stay scoped to createdLeads
+ * (informational shipment-verification stats about orders PLACED this
+ * period — unchanged framing from Phase 34/35/36).
  *
- *   cnfLeads             — cohortLeads filtered to isCnfLead().
- *   cnfLeadsCount         — cnfLeads.length. A raw, real count — NEVER
- *                           scaled by cnfRevenueRate.
- *   cnfRevenueRate        — the configured percent (settings.cnfRevenueRate,
- *                           0–100, default 50).
- *   cnfPotentialRevenue   — sum of `total` across EVERY CNF lead (i.e. what
- *                           revenue would be if the rate were 100%) —
- *                           shown for context, never itself booked as
- *                           revenue.
- *   avgCnfOrderValue      — cnfPotentialRevenue ÷ cnfLeadsCount, the
- *                           existing "average order value" structure the
- *                           spec asks to reuse.
- *   cnfRevenueCountedCount — round(cnfLeadsCount × cnfRevenueRate/100) —
- *                           the "Revenue-Counted CNF" order count (e.g.
- *                           40 × 50% = 20 orders). Rounded to a whole
- *                           number of orders since expenses below are
- *                           charged per whole order.
- *   cnfRevenue            — avgCnfOrderValue × cnfRevenueCountedCount —
- *                           the actual Abandoned Cart revenue booked for
- *                           this range, and what "Confirmed Revenue" now
- *                           means everywhere it's read.
- *
- * Expenses/profit use the same per-order formula Phase 25/33/34/35
- * already used (cost × count), just driven by cnfRevenueCountedCount
- * instead of deliveredCount now — the same orders whose revenue is being
- * counted are the orders whose per-order costs are charged.
+ * CNF revenue formula is textually UNCHANGED from Phase 37 — cnfLeads →
+ * cnfLeadsCount/cnfPotentialRevenue/avgCnfOrderValue →
+ * cnfRevenueCountedCount (round(cnfLeadsCount × cnfRevenueRate/100)) →
+ * cnfRevenue (avgCnfOrderValue × cnfRevenueCountedCount), expenses
+ * charged per cnfRevenueCountedCount — only WHICH leads feed `cnfLeads`
+ * changed (confirmedLeads, not createdLeads-filtered-by-current-status).
+ * The spec's own rule is preserved exactly: cnfRevenueRate only ever
+ * scales the REVENUE, never the real cnfLeadsCount shown alongside it.
  *
  * Back-compat aliases (expectedDelivered/recognizedRevenue/
- * netContribution/deliveryRate/confirmedRevenue) are kept so Dashboard.jsx
- * (and every other consumer — Daily/Analytics/Profitability/Campaign
- * Explorer, all of which only ever read this summary object, never
- * recompute it) automatically picks up the CNF-based numbers with no
- * changes to how they READ the summary — only what these names now MEAN
- * changes (recognizedRevenue/netContribution/confirmedRevenue are now
- * CNF-based, not shipment-delivery-based). expectedDelivered/deliveryRate
- * are left pointed at the old shipment-based deliveredCount — they were
- * never rendered anywhere (dead back-compat plumbing from Phase 33/34)
- * and aren't part of this phase's revenue path.
+ * netContribution/deliveryRate/confirmedRevenue/totalOrders/
+ * deliveredOrders) are kept exactly as Phase 37 defined them so
+ * Dashboard.jsx and every other consumer keeps working with zero changes
+ * to how they READ the summary — only cancelledCount/returnedCount are
+ * new, additive fields.
  */
-export function computeAbandonedCartSummary(cohortLeads, settings) {
-  const orders = cohortLeads.length;
-  const potentialRevenue = cohortLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
+export function computeAbandonedCartSummary(cohortLeads, settings, since, until) {
+  const inRange = (dateIst) => !!dateIst && dateIst >= since && dateIst <= until;
 
-  const matchedLeads = cohortLeads.filter((l) => l.matchedShipmentFound);
-  const deliveredLeads = cohortLeads.filter((l) => isDeliveredMatch(l));
+  const createdLeads = cohortLeads.filter((l) => inRange(l.orderDateIst));
+  const confirmedLeads = cohortLeads.filter((l) => inRange(l.confirmedDateIst));
+  const deliveredLeads = cohortLeads.filter((l) => inRange(l.matchedDeliveredDateIst));
+  const cancelledLeads = cohortLeads.filter((l) => inRange(l.cancelledDateIst));
+  const returnedLeads = cohortLeads.filter((l) => inRange(l.returnedDateIst));
+
+  const orders = createdLeads.length;
+  const potentialRevenue = createdLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
+
+  const matchedLeads = createdLeads.filter((l) => l.matchedShipmentFound);
   // Phase 36 §1 — distinct from "unmatched" (a lookup that ran and found
   // nothing): this order's phone lookup simply hasn't run yet
   // (shipmentLookupCheckedAt is still null), so its shipment status isn't
   // verified against Traflead at all yet. Surfaced so the UI never shows
   // "Not Found" for an order that was actually just never checked.
-  const pendingVerification = cohortLeads.filter((l) => !l.shipmentLookupCheckedAt).length;
+  const pendingVerification = createdLeads.filter((l) => !l.shipmentLookupCheckedAt).length;
 
   const matched = matchedLeads.length;
   const unmatched = orders - matched;
   const deliveredCount = deliveredLeads.length;
-  const notDeliveredMatched = matched - deliveredCount;
   const deliveredRevenue = deliveredLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
+  // notDeliveredMatched keeps its Phase 34/35/36 meaning — of the orders
+  // PLACED this period that matched a shipment, how many aren't (yet, or
+  // ever) delivered — informational, unrelated to deliveredLeads' own
+  // date-of-delivery cohort above.
+  const notDeliveredMatched = matched - createdLeads.filter((l) => isDeliveredMatch(l)).length;
 
-  // Phase 37 — CNF-based revenue (see header comment above).
-  const cnfLeads = cohortLeads.filter(isCnfLead);
+  const cancelledCount = cancelledLeads.length;
+  const returnedCount = returnedLeads.length;
+
+  // Phase 40 — CNF-based revenue, now driven by confirmedLeads (Phase 37's
+  // formula, unchanged — see header comment above).
+  const cnfLeads = confirmedLeads;
   const cnfLeadsCount = cnfLeads.length;
   const cnfRevenueRate = Math.min(100, Math.max(0, Number(settings.cnfRevenueRate ?? 50) || 0));
   const cnfPotentialRevenue = cnfLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
@@ -1069,9 +1241,9 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
   const shippingCost = Number(settings.shippingCost) || 0;
   const miscCost = Number(settings.miscCost) || 0;
 
-  // Phase 37 — expenses now charged per CNF revenue-counted order (was
-  // per shipment-delivered order) — the same orders whose revenue is
-  // being counted are the orders whose per-order costs are charged.
+  // Phase 37 — expenses charged per CNF revenue-counted order — the same
+  // orders whose revenue is being counted are the orders whose per-order
+  // costs are charged. Unchanged formula.
   const manufacturingExpense = cnfRevenueCountedCount * manufacturingCost;
   const packagingExpense = cnfRevenueCountedCount * packagingCost;
   const shippingExpense = cnfRevenueCountedCount * shippingCost;
@@ -1081,7 +1253,7 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
   const profit = cnfRevenue - totalExpenses;
 
   const byMatchedStatus = {};
-  for (const l of cohortLeads) {
+  for (const l of createdLeads) {
     const s = l.matchedShipmentFound ? l.matchedShipmentStatus || "(no status)" : "(not found)";
     byMatchedStatus[s] = (byMatchedStatus[s] || 0) + 1;
   }
@@ -1093,11 +1265,14 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
     unmatched,
     pendingVerification,
     // Shipment-verification figures (Phase 34/35/36 §1) — informational
-    // only as of Phase 37, no longer part of the revenue/profit formula.
+    // only, no longer part of the revenue/profit formula.
     deliveredCount,
     notDeliveredMatched,
     deliveredRevenue,
-    // Phase 37 — CNF-based revenue, now the actual revenue/profit driver.
+    // Phase 40 — new lifecycle event counts.
+    cancelledCount,
+    returnedCount,
+    // Phase 37/40 — CNF-based revenue, the actual revenue/profit driver.
     cnfLeadsCount,
     cnfRevenueRate,
     cnfPotentialRevenue,
@@ -1112,25 +1287,16 @@ export function computeAbandonedCartSummary(cohortLeads, settings) {
     profit,
     byMatchedStatus,
     // Back-compat aliases (Phase 33/34 field names) — same names, now
-    // sourced from the CNF-based figures (recognizedRevenue/
-    // netContribution/confirmedRevenue) so every existing consumer that
-    // only reads these names picks up Phase 37's revenue model with zero
-    // changes on its end. expectedDelivered/deliveryRate stay pointed at
-    // the shipment-based deliveredCount — dead, never-rendered plumbing
-    // from Phase 33/34, unrelated to this phase's revenue path.
+    // sourced from the correctly-date-attributed figures so every
+    // existing consumer that only reads these names picks up Phase 40's
+    // fix with zero changes on its end.
     expectedDelivered: deliveredCount,
     recognizedRevenue: cnfRevenue,
     netContribution: profit,
     deliveryRate: orders ? (deliveredCount / orders) * 100 : 0,
-    // Phase 36 §2 — order-count terminology, unchanged by Phase 37 (still
-    // literally every order / every shipment-delivered order — Phase 37
-    // doesn't touch order counts, only how REVENUE is recognized).
     totalOrders: orders,
     deliveredOrders: deliveredCount,
     nonDeliveredOrders: orders - deliveredCount,
-    // Phase 36 §2/§3 named this "Confirmed Revenue"; Phase 37 makes it
-    // literally that — revenue confirmed via CNF status, not shipment
-    // delivery.
     confirmedRevenue: cnfRevenue,
   };
 }
@@ -1157,35 +1323,79 @@ export async function findPendingShipmentOrderDays({ lookbackDays = 45, maxDays 
   return days.filter(Boolean).sort().slice(0, maxDays);
 }
 
-// ─── Phase 35 — Daily tab per-day breakdown ──────────────────────────
+// ─── Phase 40 — Daily tab per-day lifecycle breakdown ────────────────
 //
-// One row per IST day in [since, until]: `leads` is the order-date
-// cohort count for that day, and `delivered`/`deliveredRevenue` are
-// ALSO for that same day's cohort (phone-matched status checked NOW,
-// attributed to the day the order was PLACED) — there's only one date
-// axis in Phase 35, so unlike Phase 34 these three numbers now always
-// come from the exact same subset of leads, just grouped by orderDateIst.
+// One row per IST day in [since, until], each of the 5 lifecycle events
+// bucketed by its OWN date field (never orderDateIst for all of them —
+// that was the Phase 40 bug) — matches the spec's own example table
+// exactly: Date | Created | CNF | Delivered | Cancelled | Returned.
+// `cnfRevenueCountedCount`/`cnfRevenue` are computed per day with the
+// exact same round(count × rate/100) formula computeAbandonedCartSummary
+// uses for the whole range — independently rounded per day, so daily
+// figures summed across a range can differ from the range summary's own
+// total by a unit or two (same rounding trade-off Phase 37 already
+// accepted for the range figure, not a new inconsistency this phase
+// introduces).
 export async function getAbandonedCartDailyBreakdown(since, until) {
   const days = enumerateDays(since, until);
-  const cohortLeads = await getStoredTrafleadLeads(since, until);
+  const cohortLeads = await getAbandonedCartLifecycleCohort(since, until);
+  const settings = await getOrCreateAbandonedCartSettings();
+  const cnfRevenueRate = Math.min(100, Math.max(0, Number(settings.cnfRevenueRate ?? 50) || 0));
 
-  const leadsByDay = new Map();
+  const createdByDay = new Map();
+  const confirmedByDay = new Map(); // day -> [leads]
   const deliveredByDay = new Map();
-  const revenueByDay = new Map();
+  const deliveredRevenueByDay = new Map();
+  const cancelledByDay = new Map();
+  const returnedByDay = new Map();
+
+  const bump = (map, key, inc = 1) => map.set(key, (map.get(key) || 0) + inc);
+
   for (const l of cohortLeads) {
-    const d = l.orderDateIst;
-    if (!d) continue;
-    leadsByDay.set(d, (leadsByDay.get(d) || 0) + 1);
-    if (isDeliveredMatch(l)) {
-      deliveredByDay.set(d, (deliveredByDay.get(d) || 0) + 1);
-      revenueByDay.set(d, (revenueByDay.get(d) || 0) + (Number(l.total) || 0));
+    if (l.orderDateIst && l.orderDateIst >= since && l.orderDateIst <= until) {
+      bump(createdByDay, l.orderDateIst);
+    }
+    if (l.confirmedDateIst && l.confirmedDateIst >= since && l.confirmedDateIst <= until) {
+      if (!confirmedByDay.has(l.confirmedDateIst)) confirmedByDay.set(l.confirmedDateIst, []);
+      confirmedByDay.get(l.confirmedDateIst).push(l);
+    }
+    if (l.matchedDeliveredDateIst && l.matchedDeliveredDateIst >= since && l.matchedDeliveredDateIst <= until) {
+      bump(deliveredByDay, l.matchedDeliveredDateIst);
+      deliveredRevenueByDay.set(
+        l.matchedDeliveredDateIst,
+        (deliveredRevenueByDay.get(l.matchedDeliveredDateIst) || 0) + (Number(l.total) || 0)
+      );
+    }
+    if (l.cancelledDateIst && l.cancelledDateIst >= since && l.cancelledDateIst <= until) {
+      bump(cancelledByDay, l.cancelledDateIst);
+    }
+    if (l.returnedDateIst && l.returnedDateIst >= since && l.returnedDateIst <= until) {
+      bump(returnedByDay, l.returnedDateIst);
     }
   }
 
-  return days.map((date) => ({
-    date,
-    leads: leadsByDay.get(date) || 0,
-    delivered: deliveredByDay.get(date) || 0,
-    deliveredRevenue: revenueByDay.get(date) || 0,
-  }));
+  return days.map((date) => {
+    const dayCnfLeads = confirmedByDay.get(date) || [];
+    const cnfCount = dayCnfLeads.length;
+    const cnfPotentialRevenue = dayCnfLeads.reduce((sum, l) => sum + (Number(l.total) || 0), 0);
+    const avgCnfOrderValue = cnfCount ? cnfPotentialRevenue / cnfCount : 0;
+    const cnfRevenueCountedCount = Math.round(cnfCount * (cnfRevenueRate / 100));
+    const cnfRevenue = avgCnfOrderValue * cnfRevenueCountedCount;
+
+    return {
+      date,
+      created: createdByDay.get(date) || 0,
+      cnf: cnfCount,
+      delivered: deliveredByDay.get(date) || 0,
+      cancelled: cancelledByDay.get(date) || 0,
+      returned: returnedByDay.get(date) || 0,
+      cnfRevenueRate,
+      cnfRevenueCountedCount,
+      cnfRevenue,
+      deliveredRevenue: deliveredRevenueByDay.get(date) || 0,
+      // Back-compat — AbandonedCartDailyTable/other older callers reading
+      // the pre-Phase-40 field names still get sane values.
+      leads: createdByDay.get(date) || 0,
+    };
+  });
 }

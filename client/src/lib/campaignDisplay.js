@@ -86,3 +86,27 @@ export function bidCapApplicability(bidStrategy) {
   if (BID_CAP_APPLICABLE_STRATEGIES.has(bidStrategy)) return "applicable";
   return "unknown";
 }
+
+// Phase 38 — Campaign Bid Cap Fallback to Ad Set. Same convention as
+// formatBudget() above, just without a daily/lifetime cadence suffix —
+// a bid cap is a single per-result cap, not a spend-over-time amount.
+export function formatBidCapAmount(value) {
+  if (value === null || value === undefined) return null;
+  return `₹${Number(value).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+// Plain-text Bid Cap formatter for contexts that can't render
+// BidCapCell's JSX caption (CSV export, Comparison panels' "format"
+// functions) — reads the exact same {bidCapMin, bidCapMax, bidCapSource}
+// contract every /compare-shaped campaign row now carries (see
+// campaigns.js/campaignExplorer.js/dailyReports.js). "campaign" or a
+// same-value Ad Set rollup renders as one number; differing Ad Set bid
+// caps render as an explicit min–max range rather than inventing a
+// single value. Only ever "N/A" when neither the Campaign nor any of
+// its Ad Sets have a usable bid cap.
+export function formatBidCapText({ bidCapMin, bidCapMax, bidCapSource } = {}) {
+  if (bidCapSource !== "campaign" && bidCapSource !== "adsets") return "N/A";
+  if (bidCapMin === null || bidCapMin === undefined) return "N/A";
+  if (bidCapMax === null || bidCapMax === undefined || bidCapMax === bidCapMin) return formatBidCapAmount(bidCapMin);
+  return `${formatBidCapAmount(bidCapMin)}–${formatBidCapAmount(bidCapMax)}`;
+}

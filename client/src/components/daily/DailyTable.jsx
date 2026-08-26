@@ -6,7 +6,7 @@ import ColumnSettingsMenu from "../ColumnSettingsMenu";
 import { downloadCsv } from "../../lib/csv";
 import { currency, number } from "../../lib/format";
 import { formatDayLabel } from "../../lib/dateIst";
-import { LiveIndicator, RoasValue, StatusPill, BudgetCell } from "../CampaignCells";
+import { LiveIndicator, RoasValue, StatusPill, BudgetCell, BidCapCell } from "../CampaignCells";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 — the Daily page's main table. Two view modes over the same
@@ -252,6 +252,15 @@ function DailyRowCell({ col, row }) {
     return (
       <td className="num">
         <BudgetCell budget={row.budget} budgetType={row.budgetType} budgetSource={row.budgetSource} />
+      </td>
+    );
+  }
+  // Phase 38 — Campaign Bid Cap Fallback to Ad Set, same pattern as
+  // budget just above.
+  if (col.key === "bidCap") {
+    return (
+      <td className="num">
+        <BidCapCell bidCapMin={row.bidCapMin} bidCapMax={row.bidCapMax} bidCapSource={row.bidCapSource} />
       </td>
     );
   }

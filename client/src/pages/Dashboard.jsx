@@ -41,7 +41,7 @@ import { useSwrFetch } from "../lib/useSwr";
 import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
 import { useSelectedToken } from "../lib/useSelectedToken";
 import CampaignLink from "../components/CampaignLink";
-import { CampaignNameCell, RoasValue, BudgetCell } from "../components/CampaignCells";
+import { CampaignNameCell, RoasValue, BudgetCell, BidCapCell } from "../components/CampaignCells";
 import KpiAnalyticsPopup from "../components/KpiAnalyticsPopup";
 import { useOrderDrawer } from "../lib/OrderDrawerContext";
 import { useLiveSync, rangeIncludesToday } from "../lib/LiveSyncContext";
@@ -49,7 +49,7 @@ import { DataFreshnessBadge, SyncStatusIndicator } from "../components/LiveSyncW
 import RecentlyViewedWidget from "../components/RecentlyViewedWidget";
 import SavedViewsControl from "../components/SavedViewsControl";
 import DashboardCustomizePanel from "../components/DashboardCustomizePanel";
-import DeliveredRevenuePopup from "../components/DeliveredRevenuePopup";
+import AbandonedCartEventPopup from "../components/AbandonedCartEventPopup";
 import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
 import { useDashboardLayout } from "../lib/dashboardLayout";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
@@ -367,12 +367,6 @@ export default function Dashboard() {
   const [abandonedCartSummary, setAbandonedCartSummary] = useState(null);
   const [abandonedCartLoading, setAbandonedCartLoading] = useState(false);
   const [abandonedCartError, setAbandonedCartError] = useState(null);
-  // Phase 34 — shipment-level rows behind the Delivered Revenue figure,
-  // for the drill-down popup. Same fetch as the summary above (no extra
-  // request) — just also keeping the part of the response the old code
-  // discarded.
-  const [abandonedCartDeliveredLeads, setAbandonedCartDeliveredLeads] = useState([]);
-  const [abandonedCartDeliveredLeadsTruncated, setAbandonedCartDeliveredLeadsTruncated] = useState(false);
 
   const loadAbandonedCartSummary = () => {
     if (!since || !until) return () => {};
@@ -383,8 +377,6 @@ export default function Dashboard() {
       .then((res) => {
         if (cancelled) return;
         setAbandonedCartSummary(res.summary || null);
-        setAbandonedCartDeliveredLeads(res.deliveredLeads || []);
-        setAbandonedCartDeliveredLeadsTruncated(!!res.deliveredLeadsTruncated);
       })
       .catch((err) => {
         if (!cancelled) setAbandonedCartError(err?.message || "Failed to load abandoned cart data");
@@ -600,6 +592,8 @@ export default function Dashboard() {
       deliveredCount: 0,
       notDeliveredMatched: 0,
       deliveredRevenue: 0,
+      cancelledCount: 0,
+      returnedCount: 0,
       cnfLeadsCount: 0,
       cnfRevenueRate: 0,
       cnfRevenueCountedCount: 0,
@@ -634,6 +628,12 @@ export default function Dashboard() {
     const abandonedCartDeliveredCount = ac.deliveredCount || 0;
     const abandonedCartNotDeliveredMatched = ac.notDeliveredMatched || 0;
     const abandonedCartShipmentDeliveredRevenue = ac.deliveredRevenue || 0;
+    // Phase 40 — new lifecycle event counts, each dated by when it
+    // actually happened (see trafleadSyncService.js's Phase 40 header
+    // comment). Informational, same as the shipment-verification figures
+    // above — not part of the revenue/profit formula.
+    const abandonedCartCancelledCount = ac.cancelledCount || 0;
+    const abandonedCartReturnedCount = ac.returnedCount || 0;
     // Delivered rate — what fraction of leads PLACED in this range are,
     // as of now, phone-matched AND delivered. Display-only, shipment-based
     // (unrelated to the CNF revenue rate setting above).
@@ -776,6 +776,9 @@ export default function Dashboard() {
           deliveredCount: abandonedCartDeliveredCount,
           notDeliveredMatched: abandonedCartNotDeliveredMatched,
           shipmentDeliveredRevenue: abandonedCartShipmentDeliveredRevenue,
+          // Phase 40 — new lifecycle event counts (see cardValues above).
+          cancelledCount: abandonedCartCancelledCount,
+          returnedCount: abandonedCartReturnedCount,
           // Phase 37 — CNF-based revenue (see cardValues above / spec).
           // `recognizedRevenue`/`profit` above ARE these numbers now —
           // these extra fields expose the chain (leads → rate → counted →
@@ -828,6 +831,9 @@ export default function Dashboard() {
         abandonedCartDeliveredCount,
         abandonedCartNotDeliveredMatched,
         abandonedCartShipmentDeliveredRevenue,
+        // Phase 40 — new lifecycle event counts.
+        abandonedCartCancelledCount,
+        abandonedCartReturnedCount,
         // Phase 37 — CNF-based revenue chain (see cardValues above).
         abandonedCartCnfLeadsCount,
         abandonedCartCnfRevenueRate,
@@ -1132,8 +1138,6 @@ export default function Dashboard() {
                       abandonedCartLoading={abandonedCartLoading}
                       abandonedCartError={abandonedCartError}
                       onRetryAbandonedCart={loadAbandonedCartSummary}
-                      abandonedCartDeliveredLeads={abandonedCartDeliveredLeads}
-                      abandonedCartDeliveredLeadsTruncated={abandonedCartDeliveredLeadsTruncated}
                       onClick={onClick}
                     />
                   );
@@ -1158,8 +1162,6 @@ export default function Dashboard() {
               abandonedCartLoading={abandonedCartLoading}
               abandonedCartError={abandonedCartError}
               onRetryAbandonedCart={loadAbandonedCartSummary}
-              abandonedCartDeliveredLeads={abandonedCartDeliveredLeads}
-              abandonedCartDeliveredLeadsTruncated={abandonedCartDeliveredLeadsTruncated}
               expenseBreakdownLoading={expenseBreakdownLoading}
               expenseBreakdownError={expenseBreakdownError}
               onRetryExpenseBreakdown={loadExpenseBreakdown}
@@ -1262,10 +1264,34 @@ export default function Dashboard() {
                                   </td>
                                 );
                               }
-                              if (c.key === "roas") {
+                              if (c.key === "bidCap") {
                                 return (
                                   <td key={c.key} className="num">
-                                    <RoasValue roas={campaign.roas} />
+                                    <BidCapCell bidCapMin={campaign.bidCapMin} bidCapMax={campaign.bidCapMax} bidCapSource={campaign.bidCapSource} />
+                                  </td>
+                                );
+                              }
+                              if (c.key === "roas") {
+                                // Phase 39 §16 — the Dashboard's default ROAS
+                                // column now shows Primary ROAS (active-period
+                                // revenue ÷ active-period spend) instead of
+                                // spend-vs-every-matched-order ROAS, so a
+                                // campaign that closed mid-range and kept
+                                // collecting orders never looks more
+                                // profitable than it actually was while
+                                // running. campaign.roas is untouched and
+                                // still returned by the API for anything else
+                                // that reads it.
+                                return (
+                                  <td key={c.key} className="num">
+                                    <RoasValue roas={campaign.primaryRoas} />
+                                  </td>
+                                );
+                              }
+                              if (c.key === "postCampaignRevenue") {
+                                return (
+                                  <td key={c.key} className="num text-slate-500">
+                                    {currency(campaign.postCampaignRevenue)}
                                   </td>
                                 );
                               }
@@ -1721,12 +1747,10 @@ function RevenueCard({
   abandonedCartLoading,
   abandonedCartError,
   onRetryAbandonedCart,
-  abandonedCartDeliveredLeads,
-  abandonedCartDeliveredLeadsTruncated,
   onClick,
 }) {
   const [open, setOpen] = useState(false);
-  const [drilldownOpen, setDrilldownOpen] = useState(false);
+  const [drilldownEvent, setDrilldownEvent] = useState(null);
 
   return (
     <div
@@ -1796,8 +1820,18 @@ function RevenueCard({
               {/* Phase 37 — CNF-based revenue, the actual revenue/profit
                   driver now. "Do not hide this calculation inside the
                   Gross Profit number" — every step is its own row. */}
-              <BreakdownRow label="Abandoned Cart Leads (synced from Traflead)" value={breakdown.abandonedCartOrders} format={number} />
-              <BreakdownRow label="CNF / Confirmed Leads" value={breakdown.abandonedCartCnfLeadsCount} format={number} />
+              <BreakdownRow
+                label="Abandoned Cart Leads (synced from Traflead)"
+                value={breakdown.abandonedCartOrders}
+                format={number}
+                onClick={() => setDrilldownEvent("created")}
+              />
+              <BreakdownRow
+                label="CNF / Confirmed Leads"
+                value={breakdown.abandonedCartCnfLeadsCount}
+                format={number}
+                onClick={() => setDrilldownEvent("cnf")}
+              />
               <BreakdownRow label="CNF Revenue Rate" value={breakdown.abandonedCartCnfRevenueRate} format={(v) => `${number(v)}%`} />
               <BreakdownRow label="Revenue Counted (CNF × Rate)" value={breakdown.abandonedCartCnfRevenueCountedCount} format={number} />
               <BreakdownRow label="Gross Potential Revenue" value={breakdown.abandonedCartPotentialRevenue} />
@@ -1817,24 +1851,40 @@ function RevenueCard({
                 </div>
               </div>
               <BreakdownRow label="Shipment Matched (by phone)" value={breakdown.abandonedCartMatched} format={number} />
-              <BreakdownRow label="Delivered" value={breakdown.abandonedCartDeliveredCount} format={number} />
+              <BreakdownRow
+                label="Delivered"
+                value={breakdown.abandonedCartDeliveredCount}
+                format={number}
+                onClick={() => setDrilldownEvent("delivered")}
+              />
               <BreakdownRow label="Not Delivered (matched, not yet)" value={breakdown.abandonedCartNotDeliveredMatched} format={number} />
               <BreakdownRow label="No Shipment Matched" value={breakdown.abandonedCartUnmatched} format={number} />
               <BreakdownRow
+                label="Cancelled"
+                value={breakdown.abandonedCartCancelledCount}
+                format={number}
+                onClick={() => setDrilldownEvent("cancelled")}
+              />
+              <BreakdownRow
+                label="Returned (RTO)"
+                value={breakdown.abandonedCartReturnedCount}
+                format={number}
+                onClick={() => setDrilldownEvent("returned")}
+              />
+              <BreakdownRow
                 label="Delivered Revenue (shipment-based, info only)"
                 value={breakdown.abandonedCartShipmentDeliveredRevenue}
-                onClick={() => setDrilldownOpen(true)}
+                onClick={() => setDrilldownEvent("delivered")}
               />
             </>
           )}
 
-          <DeliveredRevenuePopup
-            open={drilldownOpen}
+          <AbandonedCartEventPopup
+            open={!!drilldownEvent}
             since={since}
             until={until}
-            leads={abandonedCartDeliveredLeads || []}
-            truncated={abandonedCartDeliveredLeadsTruncated}
-            onClose={() => setDrilldownOpen(false)}
+            event={drilldownEvent}
+            onClose={() => setDrilldownEvent(null)}
           />
 
           <Link
@@ -1966,15 +2016,13 @@ function GrossProfitSection({
   abandonedCartLoading,
   abandonedCartError,
   onRetryAbandonedCart,
-  abandonedCartDeliveredLeads,
-  abandonedCartDeliveredLeadsTruncated,
   expenseBreakdownLoading,
   expenseBreakdownError,
   onRetryExpenseBreakdown,
   onDrill,
   onOpenOtherExpenses,
 }) {
-  const [abandonedCartDrilldownOpen, setAbandonedCartDrilldownOpen] = useState(false);
+  const [abandonedCartDrilldownEvent, setAbandonedCartDrilldownEvent] = useState(null);
   // Phase 36 §5 — collapsed by default so this full breakdown doesn't
   // overload the Dashboard on load; purely local UI state, toggling it
   // never refetches or recomputes anything — `breakdown` (and everything
@@ -2082,11 +2130,17 @@ function GrossProfitSection({
                   {number(abandonedCart.orders)} <ExternalLink size={10} className="text-slate-300" />
                 </span>
               </Link>
-              {/* Phase 37 — CNF-based revenue, the actual revenue/profit
-                  driver. Shown as its own explicit chain per spec §5
-                  ("do not hide this calculation inside the Gross Profit
-                  number"). */}
-              <StatRow label="CNF / Confirmed Leads" value={abandonedCart.cnfLeadsCount} format={number} />
+              {/* Phase 37/40 — CNF-based revenue, the actual revenue/profit
+                  driver, now genuinely dated by CNF date (see cardValues in
+                  Dashboard() above). Shown as its own explicit chain per
+                  spec §5 ("do not hide this calculation inside the Gross
+                  Profit number"). */}
+              <StatRow
+                label="CNF / Confirmed Leads"
+                value={abandonedCart.cnfLeadsCount}
+                format={number}
+                onClick={() => setAbandonedCartDrilldownEvent("cnf")}
+              />
               <StatRow label="CNF Revenue Rate" value={abandonedCart.cnfRevenueRate} format={(v) => `${number(v)}%`} />
               <StatRow label="Revenue Counted (CNF × Rate)" value={abandonedCart.cnfRevenueCountedCount} format={number} />
               <Link to={`/abandoned-carts?since=${since}&until=${until}`} className="flex items-center justify-between gap-2 py-1 -mx-1.5 px-1.5 rounded-md hover:bg-slate-50 transition-colors">
@@ -2109,25 +2163,44 @@ function GrossProfitSection({
                 </div>
               </div>
               <StatRow label="Shipment Matched (by phone)" value={abandonedCart.matched} format={number} muted />
-              <StatRow label="Delivered" value={abandonedCart.deliveredCount} format={number} muted />
+              <StatRow
+                label="Delivered"
+                value={abandonedCart.deliveredCount}
+                format={number}
+                onClick={() => setAbandonedCartDrilldownEvent("delivered")}
+                muted
+              />
               <StatRow label="Not Delivered (matched, not yet)" value={abandonedCart.notDeliveredMatched} format={number} muted />
               <StatRow label="No Shipment Matched" value={abandonedCart.unmatched} format={number} muted />
               <StatRow
+                label="Cancelled"
+                value={abandonedCart.cancelledCount}
+                format={number}
+                onClick={() => setAbandonedCartDrilldownEvent("cancelled")}
+                muted
+              />
+              <StatRow
+                label="Returned (RTO)"
+                value={abandonedCart.returnedCount}
+                format={number}
+                onClick={() => setAbandonedCartDrilldownEvent("returned")}
+                muted
+              />
+              <StatRow
                 label="Delivered Revenue (shipment-based, info only)"
                 value={abandonedCart.shipmentDeliveredRevenue}
-                onClick={() => setAbandonedCartDrilldownOpen(true)}
+                onClick={() => setAbandonedCartDrilldownEvent("delivered")}
                 muted
               />
             </div>
           )}
 
-          <DeliveredRevenuePopup
-            open={abandonedCartDrilldownOpen}
+          <AbandonedCartEventPopup
+            open={!!abandonedCartDrilldownEvent}
             since={since}
             until={until}
-            leads={abandonedCartDeliveredLeads || []}
-            truncated={abandonedCartDeliveredLeadsTruncated}
-            onClose={() => setAbandonedCartDrilldownOpen(false)}
+            event={abandonedCartDrilldownEvent}
+            onClose={() => setAbandonedCartDrilldownEvent(null)}
           />
         </div>
       </div>

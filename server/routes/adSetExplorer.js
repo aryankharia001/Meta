@@ -400,6 +400,14 @@ router.get("/:tokenId/by-campaign/:campaignId", async (req, res) => {
       // sets' own budgets into a consolidated campaign total. Read-only —
       // never touches Phase 27's budget history/write endpoints.
       const { budget, budgetType } = deriveBudget(meta);
+      // Phase 38 — each ad set's own real Meta bid_amount (minor units
+      // -> real currency, same convention deriveBudget() already
+      // applies), same field ADSET_FIELDS above already fetches for
+      // AdSetDrawer's Control section. Additive — lets CampaignDrawer.jsx
+      // roll these up into a Campaign Bid Cap fallback when the campaign
+      // itself has none, the same way it already does for budget via
+      // consolidatedCampaignBudget().
+      const bidAmount = meta.bid_amount !== undefined && meta.bid_amount !== null && meta.bid_amount !== "" ? Number(meta.bid_amount) / 100 : null;
       // Phase 30 — Hook Rate / Video Views.
       const threeSecVideoViews = extractThreeSecVideoViews(insights?.actions, insights?.video_play_actions);
       return {
@@ -409,6 +417,8 @@ router.get("/:tokenId/by-campaign/:campaignId", async (req, res) => {
         effectiveStatus: meta.effective_status || null,
         budget,
         budgetType,
+        bidAmount,
+        bidStrategy: meta.bid_strategy || null,
         spend,
         purchaseValue,
         roas: spend ? purchaseValue / spend : 0,
