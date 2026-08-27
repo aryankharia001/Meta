@@ -11,8 +11,6 @@ import DailyDrawer from "../components/daily/DailyDrawer";
 import DailyHourlyDrawer from "../components/daily/DailyHourlyDrawer";
 import CampaignPicker from "../components/daily/CampaignPicker";
 import DailyCompareView from "../components/daily/DailyCompareView";
-import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
-import AbandonedCartDailyTable from "../components/AbandonedCartDailyTable";
 
 // ────────────────────────────────────────────────────────────────
 // Phase 10 — Daily page. A dedicated top-level tab, separate from
@@ -329,7 +327,6 @@ export default function DailyPage() {
 
         {!error && data && (
           <>
-            <AbandonedCartSummaryCard since={since} until={until} className="mb-6" />
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3.5 mb-6">
               <RangeStat label="Spend" value={filteredTotals.spend} kind="currency" />
               <RangeStat label="Revenue" value={filteredTotals.revenue} kind="currency" />
@@ -345,7 +342,6 @@ export default function DailyPage() {
               <DailyTable days={filteredDays} onOpenRow={openRow} onOpenDate={openDate} />
             )}
 
-            <AbandonedCartDailyTable since={since} until={until} className="mt-6" />
           </>
         )}
 

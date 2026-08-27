@@ -63,7 +63,6 @@ import {
 } from "../lib/profitabilityCache";
 import { useSwrFetch } from "../lib/useSwr";
 import LastUpdatedIndicator from "../components/LastUpdatedIndicator";
-import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
 
 // Profit numbers depend on orders (which move continuously through the
 // day) — a middle-ground stale time between the fast Dashboard/Explorer
@@ -322,7 +321,6 @@ function OverviewTab({ tokenId, accountIds, since, until, refreshKey, scenario, 
       <div className="flex justify-end -mb-2">
         <LastUpdatedIndicator lastUpdatedAt={lastUpdatedAt} isValidating={isValidating} backgroundError={backgroundError} />
       </div>
-      <AbandonedCartSummaryCard since={since} until={until} />
       <HalucinatePanel scenario={scenario} setScenario={setScenario} active={scenarioActive} onReset={resetScenario} data={data} scenarioResult={scenarioResult} />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">

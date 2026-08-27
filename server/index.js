@@ -69,7 +69,7 @@ import orderCostsRouter from "./routes/orderCosts.js";
 // writes back to Traflead, never touches Meta<->Shiprocket sync,
 // campaign/order matching, or profitability logic).
 import trafleadSyncRouter from "./routes/trafleadSync.js";
-import startTrafleadSyncCron from "./services/trafleadSyncCron.js";
+import startTrafleadSyncCron, { startTrafleadRollingSyncCron } from "./services/trafleadSyncCron.js";
 
 dotenv.config();
 
@@ -214,6 +214,12 @@ const start = async () => {
     startShiprocketAutoSync();
     startMetaEntitySyncCron();
     startTrafleadSyncCron();
+    // Phase 43 — the 30-day rolling background sync (see
+    // trafleadSyncCron.js's own header comment): daily, force-re-fetches
+    // the last 30 IST days so CFM/status updates on older Abandoned Cart
+    // leads are discovered even after the day they were created on is
+    // long past. Purely additive alongside the sync above.
+    startTrafleadRollingSyncCron();
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);

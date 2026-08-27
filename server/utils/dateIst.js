@@ -34,3 +34,20 @@ export function toIstDateString(date) {
   const ist = new Date(d.getTime() + IST_OFFSET_MS);
   return ist.toISOString().slice(0, 10);
 }
+
+// ─────────────────────────────────────────────────────────────
+// Phase 43 — Abandoned Cart CFM Date Classification + 30-Day Auto
+// Refresh. The rolling background sync (services/trafleadSyncCron.js)
+// needs "N days before today" as the same IST calendar-day string
+// convention every other date field in this app already uses — a naive
+// `Date.now() - n*86400000` then `.toISOString().slice(0,10)` would
+// compute the day boundary against UTC midnight, not IST midnight, and
+// drift by a day right around the IST/UTC gap. Same IST-offset-then-
+// slice approach as todayIstIso() above, just walked back n calendar
+// days via setUTCDate (same day-arithmetic convention
+// trafleadSyncService.js's enumerateDays() already uses).
+export function nDaysAgoIstIso(n) {
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  istNow.setUTCDate(istNow.getUTCDate() - n);
+  return istNow.toISOString().slice(0, 10);
+}
