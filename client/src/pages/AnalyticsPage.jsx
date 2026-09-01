@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { fetchAnalyticsOrders, fetchLiveAdAccounts, fetchLiveCampaigns } from "../lib/api";
+import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
 // Phase 13 §14 — Analytics' new Hourly tab, reusing the same panel every
 // other Hourly integration point uses.
 import HourlyPanel from "../components/hourly/HourlyPanel";
@@ -410,6 +411,7 @@ export default function AnalyticsPage() {
 
         {!error && orders && (
           <div className={`transition-opacity ${loading ? "opacity-60 pointer-events-none" : ""}`}>
+            <AbandonedCartSummaryCard since={since} until={until} className="mb-4" />
             {activeTab === "revenue" && <RevenueSection {...sectionProps} />}
             {activeTab === "campaigns" && <CampaignSection {...sectionProps} />}
             {activeTab === "products" && <ProductSection {...sectionProps} />}

@@ -30,6 +30,8 @@ import {
   Wallet,
   Package,
   Receipt,
+  Clock,
+  ShoppingBag,
 } from "lucide-react";
 // Phase 7 — Performance: Dashboard is the default landing page, so it
 // stays a normal eager import (no loading flash on the most common
@@ -62,6 +64,13 @@ const UsersPage = lazy(() => import("./pages/UsersPage"));
 const ProfitabilityPage = lazy(() => import("./pages/ProfitabilityPage"));
 const ProductsPage = lazy(() => import("./pages/ProductsPage"));
 const ExpensesPage = lazy(() => import("./pages/ExpensesPage"));
+// Phase 44 — Campaign Activity History + Hourly ROAS. Lazy, same as
+// every other non-default page; none of the imports/lazy() calls above
+// are touched.
+const CampaignActivityPage = lazy(() => import("./pages/CampaignActivityPage"));
+// Phase 22 — Abandoned Cart Management. Lazy, same as every other
+// non-default page; none of the imports/lazy() calls above are touched.
+const AbandonedCartsPage = lazy(() => import("./pages/AbandonedCartsPage"));
 import { ShiprocketSyncProvider, useShiprocketSync } from "./lib/ShiprocketSyncContext";
 import { CampaignDrawerProvider, useCampaignDrawer } from "./lib/CampaignDrawerContext";
 import CampaignDrawer from "./components/CampaignDrawer";
@@ -104,6 +113,8 @@ const navGroups = [
       // Phase 13 §4/§5 — Campaign → Ad Set → Ad hierarchy explorers.
       { to: "/adset-explorer", label: "Ad Set Explorer", icon: Layers },
       { to: "/ad-explorer", label: "Ad Explorer", icon: Images },
+      // Phase 44 — Campaign Activity History + Hourly ROAS.
+      { to: "/campaign-activity", label: "Campaign Activity", icon: Clock },
     ],
   },
   {
@@ -275,6 +286,12 @@ function Sidebar() {
           <Wallet size={15} />
           Profitability
         </NavLink>
+        {/* Phase 22 — its own top-level menu item (not folded into the
+            "Profitability" group below), per the phase brief. */}
+        <NavLink to="/abandoned-carts" className={({ isActive }) => `sidebar-link${isActive ? " active" : ""}`}>
+          <ShoppingBag size={15} />
+          Abandoned Carts
+        </NavLink>
         <NavLink to="/favorites" className={({ isActive }) => `sidebar-link${isActive ? " active" : ""}`}>
           <Star size={15} />
           Favorites
@@ -409,6 +426,7 @@ function RoutedContent() {
           <Route path="/profitability" element={<ProfitabilityPage />} />
           <Route path="/products" element={<ProductsPage />} />
           <Route path="/expenses" element={<ExpensesPage />} />
+          <Route path="/abandoned-carts" element={<AbandonedCartsPage />} />
           <Route path="/favorites" element={<FavoritesPage />} />
           <Route path="/activity-log" element={<ActivityLogPage />} />
           <Route path="/export-center" element={<ExportCenterPage />} />
@@ -420,6 +438,7 @@ function RoutedContent() {
           <Route path="/live-campaigns" element={<LiveCampaignsPage />} />
           <Route path="/adset-explorer" element={<AdSetExplorerPage />} />
           <Route path="/ad-explorer" element={<AdExplorerPage />} />
+          <Route path="/campaign-activity" element={<CampaignActivityPage />} />
           <Route path="/ad-accounts" element={<AdAccountsPage />} />
           <Route path="/tokens" element={<TokensPage />} />
           <Route

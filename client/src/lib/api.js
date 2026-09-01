@@ -418,10 +418,11 @@ export async function fetchCustomerByPhone(phone) {
 // New, additive routes at /api/campaign-explorer — never touches
 // /campaigns/:tokenId/compare or the campaign drawer's own endpoint.
 
-export async function fetchCampaignExplorer(tokenId, { accountIds, since, until }) {
+export async function fetchCampaignExplorer(tokenId, { accountIds, since, until, includeNoLongerReturned } = {}) {
   const params = new URLSearchParams();
   params.append("since", since);
   params.append("until", until ?? since);
+  if (includeNoLongerReturned) params.append("includeNoLongerReturned", "true");
   (Array.isArray(accountIds) ? accountIds : [accountIds]).forEach((id) => params.append("adAccountId", id));
   const { data } = await api.get(`/campaign-explorer/${tokenId}?${params}`);
   return data; // { success, since, until, campaigns, summary }
@@ -927,4 +928,165 @@ export async function fetchCampaignActivityTimeline(tokenId, campaignId, { since
   if (until) params.until = until;
   const { data } = await api.get(`/campaign-activity/${tokenId}/${campaignId}/timeline`, { params });
   return data; // { success, events, periods, summary }
+}
+
+// ─── Campaign Activity History + Hourly ROAS (Phase 44) ────────────
+// New, additive endpoints on the same /api/campaign-activity router
+// Phase 39's fetchCampaignActivityTimeline above already uses — that
+// function is untouched; everything below is new.
+
+// Spec §5 — one row per day: Active Campaigns, Spend, Orders, Prepaid,
+// COD, Revenue, ROAS.
+export async function fetchCampaignActivityDaily(tokenId, { accountIds, since, until } = {}) {
+  const params = new URLSearchParams({ since, until });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/daily?${params}`);
+  return data; // { success, days, summary, metaSpendAvailable, metaSpendError }
+}
+
+// Spec §6 — account-wide 24-hour breakdown for one day (no single
+// campaign selected yet): Active Campaigns, Spend, Orders, Prepaid,
+// COD, Revenue, ROAS, Budget (summed across active campaigns).
+export async function fetchCampaignActivityHourly(tokenId, { accountIds, date } = {}) {
+  const params = new URLSearchParams({ date });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/hourly?${params}`);
+  return data; // { success, hours, summary }
+}
+
+// Spec §7 — every campaign active/spending during one specific hour.
+export async function fetchCampaignsForHour(tokenId, { accountIds, date, hour } = {}) {
+  const params = new URLSearchParams({ date, hour });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/hourly/campaigns?${params}`);
+  return data; // { success, campaigns }
+}
+
+// Spec §17 (Campaign-Based mode) — every campaign's whole-day totals,
+// hour-independent (the Day -> Campaign list entry point).
+export async function fetchCampaignsForDay(tokenId, { accountIds, date } = {}) {
+  const params = new URLSearchParams({ date });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/day-campaigns?${params}`);
+  return data; // { success, campaigns }
+}
+
+// Spec §6/§8/§9 — one campaign's own 24-hour drill: Budget, Bid Cap,
+// Spend, Orders, Prepaid, COD, Revenue, hourly ROAS, Status.
+export async function fetchCampaignHourly(tokenId, campaignId, { accountIds, date, campaignName } = {}) {
+  const params = new URLSearchParams({ date });
+  if (campaignName) params.set("campaignName", campaignName);
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/campaign/${campaignId}/hourly?${params}`);
+  return data; // { success, hours, summary, entityName, campaignId, campaignName }
+}
+
+// Spec §11 — Ad Sets under a campaign, for one hour.
+export async function fetchAdSetsForCampaignHour(tokenId, campaignId, hour, { accountIds, date } = {}) {
+  const params = new URLSearchParams({ date });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/campaign/${campaignId}/hourly/${hour}/adsets?${params}`);
+  return data; // { success, children }
+}
+
+// Spec §12 — one ad set's own 24-hour drill.
+export async function fetchAdSetHourly(tokenId, adsetId, { accountIds, date, campaignId } = {}) {
+  const params = new URLSearchParams({ date });
+  if (campaignId) params.set("campaignId", campaignId);
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/adset/${adsetId}/hourly?${params}`);
+  return data; // { success, hours, summary }
+}
+
+// Spec §11/§13 — Ads under an ad set, for one hour.
+export async function fetchAdsForAdSetHour(tokenId, adsetId, hour, { accountIds, date } = {}) {
+  const params = new URLSearchParams({ date });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/adset/${adsetId}/hourly/${hour}/ads?${params}`);
+  return data; // { success, children }
+}
+
+// Spec §13 — one ad's own 24-hour drill.
+export async function fetchAdHourly(tokenId, adId, { accountIds, date } = {}) {
+  const params = new URLSearchParams({ date });
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/ad/${adId}/hourly?${params}`);
+  return data; // { success, hours, summary }
+}
+
+// Spec §23-§30 — Before/After Comparison Window. beforeStart/beforeEnd/
+// afterStart/afterEnd are inclusive hour numbers (0-23).
+export async function fetchCampaignActivityCompare(
+  tokenId,
+  { accountIds, entityType, entityId, campaignId, campaignName, date, beforeStart, beforeEnd, afterStart, afterEnd } = {}
+) {
+  const params = new URLSearchParams({ entityType, entityId, date, beforeStart, beforeEnd, afterStart, afterEnd });
+  if (campaignId) params.set("campaignId", campaignId);
+  if (campaignName) params.set("campaignName", campaignName);
+  (accountIds || []).forEach((id) => params.append("adAccountId", id));
+  const { data } = await api.get(`/campaign-activity/${tokenId}/compare?${params}`);
+  return data; // { success, before, after, comparison, changes, timeline }
+}
+
+
+// ─── Campaign Identity — name history & manual mappings (Campaign
+// History Phase) ─────────────────────────────────────────────────
+// New, additive endpoints on the new /api/campaign-identity router
+// (see server/routes/campaignIdentity.js's header). Backs the Campaign
+// Drill drawer's new "Campaign Identity" / "Historical Names" section
+// — never touches fetchCampaignDetails or any other existing endpoint.
+//
+// addCampaignHistoricalName/updateCampaignHistoricalName use
+// `validateStatus: () => true` deliberately, instead of the usual
+// try/catch-via-interceptor pattern every other function in this file
+// uses: the server's 409 collision response carries structured detail
+// (conflictType, conflictingCampaignId/Name) the shared response
+// interceptor above does NOT forward onto its thrown Error (it only
+// ever attaches `.message`/`.status`, by design, for every other
+// caller in this app) — reading the raw response here, only for these
+// two calls, keeps that shared interceptor completely untouched while
+// still letting the drawer's "Add Anyway" flow see exactly what
+// conflicted.
+
+export async function fetchCampaignIdentity(tokenId, campaignId) {
+  const { data } = await api.get(`/campaign-identity/${tokenId}/${campaignId}`);
+  return data; // { success, campaignId, currentName, isDeleted, noLongerReturnedAt, lastSeenAt, autoHistoricalNames, manualMappings }
+}
+
+function campaignIdentityConflictError(res, fallbackMessage) {
+  const body = res.data || {};
+  const err = new Error(body.message || fallbackMessage);
+  err.status = res.status;
+  if (res.status === 409 && body.conflict) {
+    err.conflict = true;
+    err.conflictType = body.conflictType;
+    err.conflictingCampaignId = body.conflictingCampaignId;
+    err.conflictingCampaignName = body.conflictingCampaignName;
+  }
+  return err;
+}
+
+export async function addCampaignHistoricalName(tokenId, campaignId, { historicalName, note, force } = {}) {
+  const res = await api.post(
+    `/campaign-identity/${tokenId}/${campaignId}/mapping`,
+    { historicalName, note, force },
+    { validateStatus: () => true }
+  );
+  if (!res.data?.success) throw campaignIdentityConflictError(res, "Failed to add historical name");
+  return res.data; // { success, mapping }
+}
+
+export async function updateCampaignHistoricalName(tokenId, campaignId, mappingId, { historicalName, note, force } = {}) {
+  const res = await api.put(
+    `/campaign-identity/${tokenId}/${campaignId}/mapping/${mappingId}`,
+    { historicalName, note, force },
+    { validateStatus: () => true }
+  );
+  if (!res.data?.success) throw campaignIdentityConflictError(res, "Failed to update historical name");
+  return res.data; // { success, mapping }
+}
+
+export async function deleteCampaignHistoricalName(tokenId, campaignId, mappingId) {
+  const { data } = await api.delete(`/campaign-identity/${tokenId}/${campaignId}/mapping/${mappingId}`);
+  return data; // { success }
 }

@@ -2,6 +2,12 @@ import express from "express";
 import Order from "../models/shiprocketorder.js";
 import Token from "../models/Token.js";
 import { todayIstIso } from "../utils/dateIst.js";
+// Campaign History Phase — additive import only, same shared resolver
+// every other route file in this app now uses (see
+// lib/campaignIdentity.js's header). Duplicated import here rather
+// than re-exported from those files, per this app's own "zero coupling
+// between phases" convention.
+import { buildCampaignIdentityResolver } from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
@@ -44,15 +50,39 @@ router.get("/orders", async (req, res) => {
       0
     );
 
+    // Campaign History Phase — spec §21's required direction: order's
+    // campaign_name -> current + auto-historical + manual mapping chain
+    // -> Campaign ID (see lib/campaignIdentity.js's header), replacing
+    // the old raw-campaignName grouping that split one renamed campaign
+    // into two buckets. This legacy endpoint has no :tokenId in its
+    // path (it reads ShiprocketOrder globally, same as before it was
+    // ever token-scoped) — every token's identity data is tried per
+    // order, first match wins, keeping this endpoint's existing
+    // token-agnostic scope. An order that resolves to no campaign at
+    // all keeps the old raw-name grouping fallback exactly as before.
+    const tokens = await Token.find({}).select("_id").lean();
+    const identityResolvers = await Promise.all(
+      tokens.map((t) => buildCampaignIdentityResolver({ tokenId: String(t._id), liveCampaigns: [] }))
+    );
+    function resolveOrderCampaign(order) {
+      for (const resolver of identityResolvers) {
+        const match = resolver.resolve(order);
+        if (match.campaignId) return match;
+      }
+      return { campaignId: null, currentName: null, matchType: "unmatched" };
+    }
+
     const campaignMap = {};
 
     orders.forEach((order) => {
-      const campaignName =
-        order.campaignName?.trim() || "Unknown Campaign";
+      const match = resolveOrderCampaign(order);
+      const rawName = order.campaignName?.trim() || "Unknown Campaign";
+      const campaignName = match.campaignId ? match.currentName || rawName : rawName;
+      const groupKey = match.campaignId || `unmatched:${rawName}`;
 
-      if (!campaignMap[campaignName]) {
-        campaignMap[campaignName] = {
-          campaignId: order.campaignId,
+      if (!campaignMap[groupKey]) {
+        campaignMap[groupKey] = {
+          campaignId: match.campaignId || order.campaignId,
           campaignName,
           totalOrders: 0,
           totalPayout: 0,
@@ -60,17 +90,19 @@ router.get("/orders", async (req, res) => {
         };
       }
 
-      campaignMap[campaignName].totalOrders += 1;
-      campaignMap[campaignName].totalPayout +=
+      campaignMap[groupKey].totalOrders += 1;
+      campaignMap[groupKey].totalPayout +=
         order.totalAmountPayable || 0;
 
-      campaignMap[campaignName].orders.push({
+      campaignMap[groupKey].orders.push({
         orderId: order.orderId,
         orderDate: order.orderDate,
         totalAmountPayable: order.totalAmountPayable,
         paymentType: order.paymentType,
         paymentStatus: order.paymentStatus,
         orderCreatedAt: order.orderCreatedAt,
+        // Campaign History Phase §22 — additive per-order debug field.
+        matchType: match.matchType,
       });
     });
 

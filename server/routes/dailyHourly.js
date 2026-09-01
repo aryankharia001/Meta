@@ -3,6 +3,12 @@ import ShiprocketOrder from "../models/shiprocketorder.js";
 import Token from "../models/Token.js";
 import AdAccount from "../models/AdAccount.js";
 import { fbGet, actIdOf, extractDeliveryStatus, deliveryBucket6, createTtlCache, GRAPH_BASE } from "../lib/metaGraph.js";
+// Campaign History Phase — additive import only, same shared resolver
+// campaigns.js/campaignExplorer.js/dailyReports.js now also use (see
+// lib/campaignIdentity.js's header). Duplicated import here rather than
+// re-exported from those files, per this file's own "zero coupling to
+// earlier phases" convention stated below.
+import { buildCampaignIdentityResolver, buildSingleCampaignResolver } from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
@@ -26,9 +32,10 @@ const router = express.Router();
 // Hour → Campaign → Ad Set → Ad hierarchy the spec asks for, entirely
 // from data already stored — no guessing.
 //
-// Campaign matching follows dailyReports.js's exact established rule:
-// match by NAME (normalizeCampaignName) against the real campaigns
-// Meta returns for the selected ad accounts, never by the raw
+// Campaign matching follows dailyReports.js's exact established rule
+// (Campaign History Phase): the order's campaign_name is resolved
+// through the shared current + auto-historical + manual mapping chain
+// (lib/campaignIdentity.js) to a Campaign ID, never by the raw
 // campaignId Shiprocket stores per order (that field comes from a UTM
 // parameter, not guaranteed to equal Meta's real campaign id — the same
 // reason dailyReports.js/campaignExplorer.js never trust it directly).
@@ -160,10 +167,15 @@ async function resolveTokenAndAccounts(tokenId, adAccountIdParam) {
 // order's campaignName doesn't match any campaign the selected accounts
 // actually have — the caller labels those "Unmatched" rather than
 // guessing.
-function matchCampaign(order, byNormName) {
-  const norm = normalizeCampaignName(order.campaignName);
-  const hit = norm ? byNormName.get(norm) : null;
-  if (hit) return { campaignId: hit.campaignId, campaignName: hit.campaignName, isUnmatched: false };
+function matchCampaign(order, resolver) {
+  // Campaign History Phase — resolved via the shared current + auto-
+  // historical + manual mapping chain (see lib/campaignIdentity.js's
+  // header) instead of exact-current-name-only, so a renamed campaign's
+  // pre-rename orders still match here.
+  const match = resolver.resolve(order);
+  if (match.campaignId) {
+    return { campaignId: match.campaignId, campaignName: match.currentName || order.campaignName, isUnmatched: false };
+  }
   return { campaignId: null, campaignName: order.campaignName || "Unmatched", isUnmatched: true };
 }
 
@@ -207,10 +219,14 @@ router.get("/:tokenId/summary", async (req, res) => {
       const list = await tryFetchCampaigns(actIdOf(accountId), token.accessToken);
       list.forEach((c) => campaignMeta.set(String(c.id), { name: c.name, accountId }));
     }
-    const byNormName = new Map(); // normalized name -> {campaignId, campaignName}
-    campaignMeta.forEach((v, id) => {
-      const n = normalizeCampaignName(v.name);
-      if (n && !byNormName.has(n)) byNormName.set(n, { campaignId: id, campaignName: v.name });
+    const campaignIdentityResolver = await buildCampaignIdentityResolver({
+      tokenId,
+      accountIds,
+      liveCampaigns: [...campaignMeta.entries()].map(([id, v]) => ({
+        campaignId: id,
+        campaignName: v.name,
+        accountId: v.accountId,
+      })),
     });
 
     // ── Meta hourly spend, summed across the selected accounts ──
@@ -235,7 +251,7 @@ router.get("/:tokenId/summary", async (req, res) => {
 
     // ── Per-order enrichment (matched campaign + resolved names) ──
     const enriched = dayOrders.map((o) => {
-      const match = matchCampaign(o, byNormName);
+      const match = matchCampaign(o, campaignIdentityResolver);
       const adset = o.adsetId ? adsetMap.get(String(o.adsetId)) : null;
       const ad = o.adId ? adMap.get(String(o.adId)) : null;
       return {
@@ -434,11 +450,20 @@ router.get("/:tokenId/hour-orders", async (req, res) => {
     if (adId) scoped = scoped.filter((o) => String(o.adId || "") === String(adId));
     else if (adsetId) scoped = scoped.filter((o) => String(o.adsetId || "") === String(adsetId));
     else if (campaignId || campaignName) {
-      // Mirrors hourly.js's campaign-scoping: the caller already has the
-      // matched campaign's real name from the /summary response, so
-      // match by that rather than re-deriving it here.
-      const normalized = normalizeCampaignName(campaignName);
-      scoped = normalized ? scoped.filter((o) => normalizeCampaignName(o.campaignName) === normalized) : scoped;
+      // Campaign History Phase — scoped via the shared current + auto-
+      // historical + manual mapping chain (see lib/campaignIdentity.js's
+      // header) whenever a campaignId is available (the normal case —
+      // /summary above always returns one for a matched campaign), so a
+      // renamed campaign's pre-rename orders still land in this
+      // drill-down. Falls back to the old exact-name comparison only if
+      // a caller somehow supplies just a campaignName with no id.
+      if (campaignId) {
+        const singleResolver = await buildSingleCampaignResolver({ tokenId, campaignId, currentName: campaignName || "" });
+        scoped = scoped.filter((o) => singleResolver.resolve(o).campaignId);
+      } else {
+        const normalized = normalizeCampaignName(campaignName);
+        scoped = normalized ? scoped.filter((o) => normalizeCampaignName(o.campaignName) === normalized) : scoped;
+      }
     }
     if (paymentType) scoped = scoped.filter((o) => o.paymentType === paymentType);
     if (deliveryBucket) {

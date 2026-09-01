@@ -13,15 +13,20 @@ const listCache = new Map();
 const breakdownCache = new Map();
 const liveCache = new Map();
 
-const listKey = (tokenId, accountIds, since, until) => `${tokenId}|${[...accountIds].sort().join(",")}|${since}|${until}`;
+// Campaign History Phase §9/§10 — includeNoLongerReturned is folded
+// into the key (defaulting to the existing off-state) so toggling
+// "Show No Longer Returned Campaigns" never serves a cached response
+// meant for the other state.
+const listKey = (tokenId, accountIds, since, until, includeNoLongerReturned = false) =>
+  `${tokenId}|${[...accountIds].sort().join(",")}|${since}|${until}|${includeNoLongerReturned ? "withDeleted" : "liveOnly"}`;
 const breakdownKey = (tokenId, campaignId, since, until) => `${tokenId}|${campaignId}|${since}|${until}`;
 const liveKey = (tokenId, accountIds) => `${tokenId}|${[...accountIds].sort().join(",")}`;
 
-export function getCachedExplorerList(tokenId, accountIds, since, until) {
-  return listCache.get(listKey(tokenId, accountIds, since, until)) || null;
+export function getCachedExplorerList(tokenId, accountIds, since, until, includeNoLongerReturned = false) {
+  return listCache.get(listKey(tokenId, accountIds, since, until, includeNoLongerReturned)) || null;
 }
-export function setCachedExplorerList(tokenId, accountIds, since, until, data) {
-  listCache.set(listKey(tokenId, accountIds, since, until), data);
+export function setCachedExplorerList(tokenId, accountIds, since, until, data, includeNoLongerReturned = false) {
+  listCache.set(listKey(tokenId, accountIds, since, until, includeNoLongerReturned), data);
 }
 
 // Phase 18 (part 2) — exported so the new useSwr hook can build the same
@@ -47,4 +52,17 @@ export function getCachedLiveExplorer(tokenId, accountIds) {
 }
 export function setCachedLiveExplorer(tokenId, accountIds, data) {
   liveCache.set(liveKey(tokenId, accountIds), data);
+}
+
+
+// Campaign History Phase — exported so invalidateOrderMatchingCaches.js (called after a manual historical
+// name mapping is added/edited/deleted) can force this session-
+// lifetime cache to refetch instead of continuing to serve an
+// order-matching result computed before the mapping existed. Every
+// existing getter/setter above is untouched — this only ever clears,
+// never reads or writes a value.
+export function clearCampaignExplorerCache() {
+  listCache.clear();
+  breakdownCache.clear();
+  liveCache.clear();
 }

@@ -1,4 +1,4 @@
-import { GRAPH_BASE } from "./metaGraph.js";
+import { GRAPH_BASE, isMetaRateLimitError } from "./metaGraph.js";
 
 // ─────────────────────────────────────────────────────────────
 // Phase 27 — the app's first Meta *write* path. Additive sibling to
@@ -11,22 +11,45 @@ import { GRAPH_BASE } from "./metaGraph.js";
 // real Meta error message rather than a generic HTTP failure (spec §12).
 // ─────────────────────────────────────────────────────────────
 
+// Same rate-limit retry the read side (metaGraph.js's fbGet()) applies —
+// a budget/bid-cap "set to X" write is idempotent, so retrying it after
+// a transient ad-account-level throttle (isMetaRateLimitError()) is
+// safe: worst case Meta just confirms the same value again. Every other
+// error (invalid field, permission, object missing) still throws
+// immediately on the first attempt, exactly as before.
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
+function rateLimitDelayMs(attempt) {
+  return Math.round(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt + Math.random() * 1000);
+}
+
 export async function fbPost(urlStr, formBody) {
-  const res = await fetch(urlStr, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(formBody).toString(),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    const msg = data.error?.message || `FB API error (${res.status})`;
-    const err = new Error(msg);
-    err.fbErrorCode = data.error?.code;
-    err.fbErrorSubcode = data.error?.error_subcode;
-    err.status = res.status && res.status >= 400 && res.status < 600 ? 400 : 502;
-    throw err;
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetch(urlStr, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(formBody).toString(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      if (isMetaRateLimitError(data.error) && attempt < RATE_LIMIT_RETRIES) {
+        const delayMs = rateLimitDelayMs(attempt);
+        console.warn(
+          `Meta API rate limit on write (code ${data.error.code}) — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      const msg = data.error?.message || `FB API error (${res.status})`;
+      const err = new Error(msg);
+      err.fbErrorCode = data.error?.code;
+      err.fbErrorSubcode = data.error?.error_subcode;
+      err.status = res.status && res.status >= 400 && res.status < 600 ? 400 : 502;
+      throw err;
+    }
+    return data;
   }
-  return data;
 }
 
 // Budget values in the app are always the real currency amount (e.g.

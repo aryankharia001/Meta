@@ -18,19 +18,66 @@ import {
   computePrimaryRoas,
   statusBucket,
 } from "../lib/campaignActivity.js";
+// Campaign History Phase — additive import only; nothing above this line
+// is touched. See lib/campaignIdentity.js's header for the full picture
+// (name history, manual mappings, deleted-campaign detection, the
+// shared order-matching resolver this file's /compare and /:campaignId/
+// details routes now use instead of their own exact-current-name-only
+// matching).
+import MetaEntityState from "../models/MetaEntityState.js";
+import {
+  buildCampaignIdentityResolver,
+  buildSingleCampaignResolver,
+  isMetaObjectMissingError,
+} from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
 // ─── Helpers ────────────────────────────────────────────────
 
+// Meta's "you are being throttled, wait and retry" signals — code 4
+// (app-level), 17 (user-level, "too many calls"), 32 (page-level),
+// 80004 (ad-account level — "There have been too many calls to this
+// ad-account. Wait a bit and try again."), 613 (custom/marketing API
+// rate limit). Deliberately narrow: every other error (missing object,
+// bad token, validation) is NOT retried and throws on the first
+// attempt, same as before. Duplicated locally rather than imported from
+// lib/metaGraph.js on purpose — this file keeps its own fbGet copy
+// exactly as the rest of its header already explains, so nothing here
+// couples to, or can be changed by, any other phase's copy.
+function isMetaRateLimitError(errData) {
+  const code = errData?.code;
+  return code === 4 || code === 17 || code === 32 || code === 80004 || code === 613;
+}
+
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
+function rateLimitDelayMs(attempt) {
+  return Math.round(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt + Math.random() * 1000);
+}
+
 async function fbGet(urlStr) {
-  const res = await fetch(urlStr);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    const msg = data.error?.message || `FB API error (${res.status})`;
-    throw new Error(msg);
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetch(urlStr);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      if (isMetaRateLimitError(data.error) && attempt < RATE_LIMIT_RETRIES) {
+        const delayMs = rateLimitDelayMs(attempt);
+        console.warn(
+          `Meta API rate limit (code ${data.error.code}) — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      const msg = data.error?.message || `FB API error (${res.status})`;
+      const err = new Error(msg);
+      err.fbErrorCode = data.error?.code;
+      err.fbErrorSubcode = data.error?.error_subcode;
+      throw err;
+    }
+    return data;
   }
-  return data;
 }
 
 async function fetchAllPages(url) {
@@ -234,6 +281,10 @@ router.get("/:tokenId/compare", async (req, res) => {
   try {
     const { tokenId } = req.params;
     const { since, until } = req.query;
+    // Campaign History Phase — hidden by default (spec: keep the live
+    // dashboard clean), revealed via this explicit opt-in flag. See the
+    // deleted-campaign synthesis block near the bottom of this route.
+    const includeNoLongerReturned = String(req.query.includeNoLongerReturned) === "true";
 
     if (!since || !until) {
       return res.status(400).json({
@@ -494,30 +545,43 @@ router.get("/:tokenId/compare", async (req, res) => {
       .lean();
 
     //-------------------------------------------------------
-    // Campaign -> Orders Map
+    // Campaign Identity Resolution — spec §21's required direction:
+    // Order -> order's campaign_name -> current + auto-historical +
+    // manual names -> Campaign ID -> Campaign record, NOT the old
+    // "Meta campaigns -> name-match -> orders" direction this file used
+    // to use (see lib/campaignIdentity.js's header for the full
+    // picture). Also folds in every campaign this app has ever tracked
+    // for these accounts, including ones Meta no longer returns, so a
+    // renamed OR deleted campaign's old orders still resolve to the
+    // right id (spec §7/§9/§19).
     //-------------------------------------------------------
 
-    const orderMap = {};
+    const campaignIdentityResolver = await buildCampaignIdentityResolver({
+      tokenId,
+      accountIds,
+      liveCampaigns: fbCampaigns.map((c) => ({
+        campaignId: c.campaign_id,
+        campaignName: c.campaign_name,
+        accountId: c.accountId,
+      })),
+    });
 
-for (const order of orders) {
+    const ordersByCampaignId = {};
+    const unmatchedOrders = [];
+    // orderId -> { campaignId, currentName, matchType } — spec §22's
+    // per-order matching debug info, threaded into orderList below.
+    const orderMatchById = new Map();
 
-  const campaignName =
-    normalizeCampaignName(
-      order.campaignName
-    );
-
-  if (!campaignName)
-    continue;
-
-  if (!orderMap[campaignName]) {
-    orderMap[campaignName] = [];
-  }
-
-  orderMap[campaignName].push(order);
-}
-
-
-const matchedCampaignNames = new Set();
+    for (const order of orders) {
+      const match = campaignIdentityResolver.resolve(order);
+      orderMatchById.set(order.orderId, match);
+      if (match.campaignId) {
+        if (!ordersByCampaignId[match.campaignId]) ordersByCampaignId[match.campaignId] = [];
+        ordersByCampaignId[match.campaignId].push(order);
+      } else {
+        unmatchedOrders.push(order);
+      }
+    }
 
     //-------------------------------------------------------
     // Merge FB + Orders
@@ -530,17 +594,9 @@ const matchedCampaignNames = new Set();
 
     const campaigns = fbCampaigns.map((campaign) => {
       const campaignId = String(campaign.campaign_id || "");
-      const normalizedName =
-  normalizeCampaignName(
-    campaign.campaign_name
-  );
 
 const campaignOrders =
-  orderMap[normalizedName] || [];
-
-if (campaignOrders.length) {
-  matchedCampaignNames.add(normalizedName);
-}
+  ordersByCampaignId[campaignId] || [];
 
       const spend = Number(campaign.spend || 0);
 
@@ -720,22 +776,92 @@ if (campaignOrders.length) {
             ? revenue / clicks
             : 0,
 
-        orderList: campaignOrders,
+        // Campaign History Phase §22 — matchType per order, alongside
+        // the existing orderList shape (additive field only).
+        orderList: campaignOrders.map((o) => ({ ...o, matchType: orderMatchById.get(o.orderId)?.matchType || null })),
       };
     });
 
-
     //-------------------------------------------------------
-// Unmatched Orders
-//-------------------------------------------------------
+    // Campaign History Phase §9/§10 — deleted / no-longer-returned
+    // campaigns, included only when explicitly requested
+    // (includeNoLongerReturned=true), hidden from the default view to
+    // keep the live dashboard clean. Built from MetaEntityState's last-
+    // known snapshot (never a Meta call — Meta no longer returns these)
+    // plus whichever of this range's orders the resolver above already
+    // attributed to them.
+    //-------------------------------------------------------
 
-const unmatchedOrders = orders.filter((order) => {
-  const normalized = normalizeCampaignName(
-    order.campaignName
-  );
+    let deletedCampaignEntries = [];
+    if (includeNoLongerReturned) {
+      const deletedFilter = { tokenId, entityType: "campaign", isDeleted: true };
+      if (accountIds && accountIds.length) deletedFilter.accountId = { $in: accountIds };
+      const deletedRows = await MetaEntityState.find(deletedFilter).lean();
 
-  return !matchedCampaignNames.has(normalized);
-});
+      deletedCampaignEntries = deletedRows.map((state) => {
+        const campaignId = String(state.entityId);
+        const campaignOrders = ordersByCampaignId[campaignId] || [];
+        const revenue = campaignOrders.reduce((sum, o) => sum + Number(o.totalAmountPayable || 0), 0);
+        const roundedRevenue = Math.round(revenue * 100) / 100;
+
+        return {
+          accountId: state.accountId,
+          campaignId,
+          campaignName: state.name || campaignId,
+          budget: state.budget,
+          budgetType: state.budgetType,
+          budgetSource: state.budget !== null && state.budget !== undefined ? "campaign" : "none",
+          bidCapMin: state.bidAmount,
+          bidCapMax: state.bidAmount,
+          bidCapSource: state.bidAmount !== null && state.bidAmount !== undefined ? "campaign" : "none",
+          status: state.status || null,
+          effectiveStatus: state.effectiveStatus || null,
+          isDeleted: true,
+          noLongerReturnedAt: state.noLongerReturnedAt || null,
+          activityTrackingAvailable: false,
+          activityStatus: "closed",
+          activeDays: null,
+          activeHours: null,
+          inactiveDays: null,
+          inactiveHours: null,
+          activePeriodsCount: null,
+          inactivePeriodsCount: null,
+          campaignStart: null,
+          campaignEnd: null,
+          activePeriodOrders: 0,
+          activePeriodRevenue: 0,
+          inactivePeriodOrders: 0,
+          inactivePeriodRevenue: 0,
+          postCampaignOrders: campaignOrders.length,
+          postCampaignRevenue: roundedRevenue,
+          historicalUnavailableOrders: 0,
+          historicalUnavailableRevenue: 0,
+          primaryRoas: null,
+          spend: 0,
+          impressions: 0,
+          reach: 0,
+          clicks: 0,
+          ctr: 0,
+          cpc: 0,
+          cpm: 0,
+          frequency: 0,
+          orders: campaignOrders.length,
+          revenue: roundedRevenue,
+          costPerOrder: 0,
+          roas: 0,
+          conversionRate: 0,
+          revenuePerClick: 0,
+          orderList: campaignOrders.map((o) => ({ ...o, matchType: orderMatchById.get(o.orderId)?.matchType || null })),
+        };
+      });
+
+      // Counted into the range's totals the same as any other matched
+      // campaign's revenue would be — spend/clicks/impressions stay 0
+      // since Meta no longer reports insights for a deleted campaign id.
+      totalRevenue += deletedCampaignEntries.reduce((sum, c) => sum + c.revenue, 0);
+    }
+
+    campaigns.push(...deletedCampaignEntries);
 
     //-------------------------------------------------------
     // Sort
@@ -985,12 +1111,38 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
     ].join(",");
 
     let campaignMeta = null;
+    // Campaign History Phase — set when Meta's live metadata fetch fails
+    // with the "object does not exist" signal AND we have a last-known
+    // MetaEntityState snapshot to fall back to (spec §9/§10: the drawer
+    // must keep working for a deleted campaign, using preserved history
+    // rather than a fabricated live value).
+    let campaignIsDeleted = false;
+    let campaignNoLongerReturnedAt = null;
     try {
       campaignMeta = await fbGet(
         `https://graph.facebook.com/v19.0/${campaignId}?fields=${encodeURIComponent(metaFields)}&access_token=${token.accessToken}`
       );
     } catch (err) {
       console.log(`Campaign meta fetch failed for ${campaignId}: ${err.message}`);
+      if (isMetaObjectMissingError(err)) {
+        const state = await MetaEntityState.findOne({ tokenId, entityType: "campaign", entityId: campaignId }).lean();
+        if (state) {
+          campaignIsDeleted = true;
+          campaignNoLongerReturnedAt = state.noLongerReturnedAt || null;
+          // Reconstructed from our own last-known snapshot only — never
+          // fabricated, exactly what Meta itself last reported. Minor-
+          // unit conversion matches deriveBudget()'s expectation below
+          // (it divides daily_budget/lifetime_budget by 100).
+          campaignMeta = {
+            id: campaignId,
+            name: state.name || campaignName,
+            status: state.status || null,
+            effective_status: state.effectiveStatus || null,
+            daily_budget: state.budgetType === "daily" && state.budget !== null ? Math.round(state.budget * 100) : undefined,
+            lifetime_budget: state.budgetType === "lifetime" && state.budget !== null ? Math.round(state.budget * 100) : undefined,
+          };
+        }
+      }
     }
 
     // Phase 39 §4 — same bounded auto-tracking baseline as /compare
@@ -1069,9 +1221,18 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       console.log(`Campaign insights fetch failed for ${campaignId}: ${err.message}`);
     }
 
-    // Orders — identical matching rule to /compare (normalized campaign
-    // name), just scoped to a single campaign and fetched lazily.
-    const normalizedTarget = normalizeCampaignName(campaignName);
+    // Orders — Campaign History Phase: resolved via the same shared
+    // current + auto-historical + manual name chain /compare uses above
+    // (buildSingleCampaignResolver — scoped to just this one campaign,
+    // so there's no cross-campaign ambiguity), replacing the old exact-
+    // current-name-only comparison. This is what makes an order placed
+    // under an old campaign name still show up here after a rename
+    // (spec §7/§18) — see lib/campaignIdentity.js's header.
+    const singleResolver = await buildSingleCampaignResolver({
+      tokenId,
+      campaignId,
+      currentName: campaignMeta?.name || campaignName,
+    });
 
     const rawOrders = await ShiprocketOrder.find({
       orderDate: { $gte: since, $lte: until },
@@ -1081,9 +1242,12 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
       )
       .lean();
 
-    const orders = rawOrders
-      .filter((o) => normalizeCampaignName(o.campaignName) === normalizedTarget)
-      .map(shapeOrderForDrawer)
+    const matchedRawOrders = rawOrders
+      .map((o) => ({ order: o, match: singleResolver.resolve(o) }))
+      .filter(({ match }) => match.campaignId);
+
+    const orders = matchedRawOrders
+      .map(({ order, match }) => ({ ...shapeOrderForDrawer(order), matchType: match.matchType }))
       .sort((a, b) => new Date(b.orderCreatedAt || 0) - new Date(a.orderCreatedAt || 0));
 
     const { budget, budgetType } = deriveBudget(campaignMeta);
@@ -1112,6 +1276,9 @@ router.get("/:tokenId/:campaignId/details", async (req, res) => {
         stopTime: campaignMeta?.stop_time || null,
         createdTime: campaignMeta?.created_time || null,
         updatedTime: campaignMeta?.updated_time || null,
+        // Campaign History Phase §9/§10 — additive fields only.
+        isDeleted: campaignIsDeleted,
+        noLongerReturnedAt: campaignNoLongerReturnedAt,
         // Phase 32 §4 — prefer the caller-supplied accountId (unchanged
         // default), fall back to Meta's own account_id on the campaign
         // node when it wasn't supplied, rather than ever leaving this
@@ -1207,10 +1374,14 @@ router.get("/:tokenId/orders-detailed", async (req, res) => {
       )
       .lean();
 
-    const orders = rawOrders.map(shapeOrderForDrawer);
-
-    // All campaign names for the selected accounts, any time range.
+    // All campaigns for the selected accounts, any time range — used for
+    // the existing knownCampaignNames (outside-range detection, kept
+    // as-is) and, additively, as liveCampaigns input to the same
+    // Campaign History identity resolver /compare and /:campaignId/
+    // details already use.
     const knownNames = new Set();
+    const knownCampaignIds = new Set();
+    const liveCampaigns = [];
     for (const accountId of accountIds || []) {
       const actId = accountId.startsWith("act_") ? accountId : `act_${accountId}`;
       try {
@@ -1222,11 +1393,41 @@ router.get("/:tokenId/orders-detailed", async (req, res) => {
         allCampaigns.forEach((c) => {
           const name = normalizeCampaignName(c.name);
           if (name) knownNames.add(name);
+          if (c.id) {
+            knownCampaignIds.add(String(c.id));
+            liveCampaigns.push({ campaignId: c.id, campaignName: c.name, accountId });
+          }
         });
       } catch (err) {
         console.log(`Known-campaign fetch failed for ${accountId}: ${err.message}`);
       }
     }
+
+    // Campaign History Phase — this endpoint used to hand the client raw,
+    // unresolved order.campaignId/campaignName only, so KpiAnalyticsPopup's
+    // Matched/Unmatched/Outside-Range KPI popups had to reclassify orders
+    // themselves by exact-name string match — which silently dropped a
+    // renamed campaign's older orders out of "Matched" even though
+    // /compare's own resolver already handles that case correctly. Now
+    // resolved here too (same resolver, same priority: manual mapping ->
+    // current name -> auto-historical name), and the result attached as
+    // additive fields only — every existing field on the shaped order
+    // (campaignId, campaignName, everything else) is untouched.
+    const campaignIdentityResolver = await buildCampaignIdentityResolver({
+      tokenId,
+      accountIds,
+      liveCampaigns,
+    });
+
+    const orders = rawOrders.map((o) => {
+      const match = campaignIdentityResolver.resolve(o);
+      return {
+        ...shapeOrderForDrawer(o),
+        resolvedCampaignId: match.campaignId || null,
+        resolvedCampaignName: match.currentName || null,
+        matchType: match.matchType,
+      };
+    });
 
     res.json({
       success: true,
@@ -1234,6 +1435,7 @@ router.get("/:tokenId/orders-detailed", async (req, res) => {
       until,
       orders,
       knownCampaignNames: [...knownNames],
+      knownCampaignIds: [...knownCampaignIds],
     });
   } catch (err) {
     console.error(err);

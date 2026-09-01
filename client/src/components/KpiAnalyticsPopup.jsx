@@ -41,12 +41,6 @@ import ColumnSettingsMenu from "./ColumnSettingsMenu";
 
 const PAGE_SIZE = 10;
 
-const normalizeCampaignName = (name) =>
-  String(name || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-
 function deliveryMatches(order, keywords) {
   return !!order.deliveryStatus && keywords.some((k) => order.deliveryStatus.toLowerCase().includes(k));
 }
@@ -208,21 +202,25 @@ export default function KpiAnalyticsPopup({ card, onClose, dashboardData, tokenI
   }, [open]);
 
   // ── Classification: matched / outside-range / truly-unmatched ──
-  // Purely client-side, from data this component already has — never
-  // touches /compare.
+  // Campaign History Phase — was purely name-based (order.campaignName
+  // vs. each in-range campaign's CURRENT name), which meant a renamed
+  // campaign's older orders silently fell out of "Matched" here even
+  // though /orders-detailed's resolvedCampaignId (the same resolver
+  // /compare uses) already resolves them correctly. Classifies by that
+  // resolved campaign id instead — the one thing that never changes.
   const classification = useMemo(() => {
     if (!detailed || !dashboardData) return null;
-    const inRangeNames = new Set((dashboardData.campaigns || []).map((c) => normalizeCampaignName(c.campaignName)));
-    const knownNames = new Set(detailed.knownCampaignNames || []);
+    const inRangeIds = new Set((dashboardData.campaigns || []).map((c) => String(c.campaignId)));
+    const knownIds = new Set((detailed.knownCampaignIds || []).map(String));
 
     const matched = [];
     const outsideRange = [];
     const trulyUnmatched = [];
 
     (detailed.orders || []).forEach((o) => {
-      const n = normalizeCampaignName(o.campaignName);
-      if (n && inRangeNames.has(n)) matched.push(o);
-      else if (n && knownNames.has(n)) outsideRange.push(o);
+      const cid = o.resolvedCampaignId ? String(o.resolvedCampaignId) : "";
+      if (cid && inRangeIds.has(cid)) matched.push(o);
+      else if (cid && knownIds.has(cid)) outsideRange.push(o);
       else trulyUnmatched.push(o);
     });
 
@@ -251,16 +249,20 @@ export default function KpiAnalyticsPopup({ card, onClose, dashboardData, tokenI
     if (!config || config.mode !== "campaignOrders") return [];
     if (config.source === "matched") {
       if (!dashboardData) return [];
-      const enrichedByName = new Map();
+      // Campaign History Phase — group by resolved campaign id (same as
+      // classification above), not by raw order.campaignName, so this
+      // orderList always lines up with the orderCount below (both now
+      // come from the same resolver instead of two different ones).
+      const enrichedById = new Map();
       (classification?.matched || []).forEach((o) => {
-        const n = normalizeCampaignName(o.campaignName);
-        if (!enrichedByName.has(n)) enrichedByName.set(n, []);
-        enrichedByName.get(n).push(o);
+        const cid = String(o.resolvedCampaignId || "");
+        if (!enrichedById.has(cid)) enrichedById.set(cid, []);
+        enrichedById.get(cid).push(o);
       });
       return (dashboardData.campaigns || [])
         .filter((c) => c.orders > 0)
         .map((c) => {
-          const orderList = enrichedByName.get(normalizeCampaignName(c.campaignName)) || [];
+          const orderList = enrichedById.get(String(c.campaignId)) || [];
           const codList = orderList.filter((o) => o.paymentType === "CASH_ON_DELIVERY");
           const prepaidList = orderList.filter((o) => o.paymentType === "PREPAID");
           return {

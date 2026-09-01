@@ -27,7 +27,7 @@ const campaignStatusHistorySchema = new mongoose.Schema(
   {
     tokenId: { type: mongoose.Schema.Types.ObjectId, ref: "Token", required: true, index: true },
     accountId: { type: String, trim: true, default: "", index: true },
-    entityType: { type: String, enum: ["campaign", "adset"], required: true, index: true },
+    entityType: { type: String, enum: ["campaign", "adset", "ad"], required: true, index: true },
     entityId: { type: String, required: true, trim: true, index: true },
     entityName: { type: String, trim: true, default: "" },
 
@@ -50,7 +50,16 @@ const campaignStatusHistorySchema = new mongoose.Schema(
     // cases) by activityTypeFor() in campaignActivity.js.
     activityType: {
       type: String,
-      enum: ["created", "activated", "paused", "resumed", "closed", "reactivated", "tracking_started"],
+      // Campaign History Phase — "no_longer_returned" added: written
+      // when Meta stops returning this campaign entirely (see
+      // MetaEntityState.js's isDeleted/noLongerReturnedAt header comment
+      // for the two detection paths). Always paired with newBucket
+      // "closed" (a campaign Meta no longer returns isn't delivering),
+      // but distinct from a genuine Meta-reported ARCHIVED/DELETED
+      // status ("closed") so the Activity Timeline can tell the two
+      // apart. Purely additive enum value — every pre-existing value is
+      // unchanged.
+      enum: ["created", "activated", "paused", "resumed", "closed", "reactivated", "tracking_started", "no_longer_returned"],
       required: true,
     },
 

@@ -49,6 +49,10 @@ import startMetaEntitySyncCron from "./services/metaEntitySyncCron.js";
 // modified. Reads CampaignStatusHistory (also new) plus the existing
 // BudgetHistory/BidCapHistory — see routes/campaignActivity.js's header.
 import campaignActivityRouter from "./routes/campaignActivity.js";
+// Campaign History Phase — Campaign Identity (name history, manual
+// historical-name mappings, deleted-campaign flagging). Entirely new,
+// additive route file; nothing above is modified.
+import campaignIdentityRouter from "./routes/campaignIdentity.js";
 // Phase 25 — Store & Fetch Real Abandoned Cart Orders. Entirely new,
 // additive route file, mounted PUBLICLY (see below, before requireAuth)
 // since Traflead/Shiprocket Engage can't hold a login session cookie.
@@ -69,7 +73,7 @@ import orderCostsRouter from "./routes/orderCosts.js";
 // writes back to Traflead, never touches Meta<->Shiprocket sync,
 // campaign/order matching, or profitability logic).
 import trafleadSyncRouter from "./routes/trafleadSync.js";
-import startTrafleadSyncCron, { startTrafleadRollingSyncCron } from "./services/trafleadSyncCron.js";
+import startTrafleadSyncCron from "./services/trafleadSyncCron.js";
 
 dotenv.config();
 
@@ -175,6 +179,8 @@ app.use("/api/campaign-control", campaignControlRouter);
 app.use("/api/adset-control", adsetControlRouter);
 // Phase 39 — additive only, alongside every route above.
 app.use("/api/campaign-activity", campaignActivityRouter);
+// Campaign History Phase — additive only, alongside every route above.
+app.use("/api/campaign-identity", campaignIdentityRouter);
 // Phase 33 — additive only, alongside every route above.
 app.use("/api/traflead-sync", trafleadSyncRouter);
 
@@ -214,12 +220,6 @@ const start = async () => {
     startShiprocketAutoSync();
     startMetaEntitySyncCron();
     startTrafleadSyncCron();
-    // Phase 43 — the 30-day rolling background sync (see
-    // trafleadSyncCron.js's own header comment): daily, force-re-fetches
-    // the last 30 IST days so CFM/status updates on older Abandoned Cart
-    // leads are discovered even after the day they were created on is
-    // long past. Purely additive alongside the sync above.
-    startTrafleadRollingSyncCron();
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);

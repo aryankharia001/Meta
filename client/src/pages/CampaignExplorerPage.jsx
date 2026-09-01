@@ -26,6 +26,7 @@ import ComparisonPanel from "../components/campaignExplorer/ComparisonPanel";
 import MoreFiltersPanel, { DEFAULT_FILTERS, applyExplorerFilters, countActiveFilters } from "../components/campaignExplorer/MoreFiltersPanel";
 import { ALL_COLUMNS } from "../lib/campaignExplorerColumns";
 import { currency, number } from "../lib/format";
+import AbandonedCartSummaryCard from "../components/AbandonedCartSummaryCard";
 
 // Phase 18 (part 2) — the server's own campaignExplorer.js route caches
 // for 45s (see campaignExplorerCache.js's file banner); matching that
@@ -123,6 +124,13 @@ export default function CampaignExplorerPage() {
   const [comparisonOpen, setComparisonOpen] = useState(false);
   const [copiedIds, setCopiedIds] = useState(false);
   const [exportingOrders, setExportingOrders] = useState(false);
+  // Campaign History Phase §9/§10 — hidden by default, revealed via this
+  // explicit toggle (same convention the server's /compare and
+  // /campaign-explorer routes use for includeNoLongerReturned). Not
+  // mirrored into the URL — deliberately a page-visit-scoped choice,
+  // same as `filters` (More Filters), not a "don't lose my place"
+  // navigation primitive like search/preset/accounts above.
+  const [includeNoLongerReturned, setIncludeNoLongerReturned] = useState(false);
 
   // Keep the URL in sync with the filters that matter for "don't lose my
   // place" navigation — doesn't fire on every keystroke re-render since
@@ -165,7 +173,9 @@ export default function CampaignExplorerPage() {
   // with the exact same tokenId+sortedAccountIds+since+until convention
   // campaignExplorerCache.js already used internally.
   const explorerCacheKey =
-    TOKEN_ID && selectedAccounts.length > 0 ? explorerListCacheKey(TOKEN_ID, selectedAccounts, since, until) : null;
+    TOKEN_ID && selectedAccounts.length > 0
+      ? explorerListCacheKey(TOKEN_ID, selectedAccounts, since, until, includeNoLongerReturned)
+      : null;
 
   const {
     data,
@@ -175,11 +185,15 @@ export default function CampaignExplorerPage() {
     backgroundError,
     lastUpdatedAt,
     refresh,
-  } = useSwrFetch(explorerCacheKey, () => fetchCampaignExplorer(TOKEN_ID, { accountIds: selectedAccounts, since, until }), {
-    staleTimeMs: EXPLORER_STALE_MS,
-    getCached: () => getCachedExplorerList(TOKEN_ID, selectedAccounts, since, until),
-    setCached: (d) => setCachedExplorerList(TOKEN_ID, selectedAccounts, since, until, d),
-  });
+  } = useSwrFetch(
+    explorerCacheKey,
+    () => fetchCampaignExplorer(TOKEN_ID, { accountIds: selectedAccounts, since, until, includeNoLongerReturned }),
+    {
+      staleTimeMs: EXPLORER_STALE_MS,
+      getCached: () => getCachedExplorerList(TOKEN_ID, selectedAccounts, since, until, includeNoLongerReturned),
+      setCached: (d) => setCachedExplorerList(TOKEN_ID, selectedAccounts, since, until, d, includeNoLongerReturned),
+    }
+  );
 
   // Phase 5-style background refresh: if a live sync tick found new
   // orders and this page's date range includes today, silently re-fetch
@@ -332,6 +346,7 @@ export default function CampaignExplorerPage() {
 
         <LiveMonitoringSection tokenId={TOKEN_ID} accountIds={selectedAccounts} onOpenCampaign={handleOpenCampaign} />
 
+        <AbandonedCartSummaryCard since={since} until={until} className="mb-4" />
 
         {/* ── Filter bar ─────────────────────────────────────── */}
         <div className="flex flex-wrap items-center gap-2.5 mb-3.5">
@@ -405,6 +420,19 @@ export default function CampaignExplorerPage() {
               <input type="date" className="input w-auto" value={customUntil} min={customSince} max={todayIso()} onChange={(e) => setCustomUntil(e.target.value)} />
             </div>
           )}
+          {/* Campaign History Phase §9/§10 — hidden by default, toggle
+              to reveal. Meta-deleted/archived campaigns are never
+              actually removed from this app's own history — this just
+              controls whether their (last-known-name, $0-spend) rows
+              also show up on the live list. */}
+          <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Campaigns Meta no longer returns (deleted/archived) — their history, orders, and identity are preserved permanently and never deleted">
+            <input
+              type="checkbox"
+              checked={includeNoLongerReturned}
+              onChange={(e) => setIncludeNoLongerReturned(e.target.checked)}
+            />
+            Show No Longer Returned Campaigns
+          </label>
           <div className="ml-auto text-xs text-slate-400">
             {since === until ? since : `${since} → ${until}`} · {filteredCampaigns.length} of {data?.campaigns?.length ?? 0} campaigns
           </div>

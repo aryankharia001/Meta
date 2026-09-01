@@ -2,6 +2,12 @@ import express from "express";
 import ShiprocketOrder from "../models/shiprocketorder.js";
 import Token from "../models/Token.js";
 import { fbGet, fetchAllPages, actIdOf, findActionValue, extractDeliveryStatus, deliveryBucket6, createTtlCache, GRAPH_BASE } from "../lib/metaGraph.js";
+// Campaign History Phase — additive import only, same shared resolver
+// campaigns.js/campaignExplorer.js/dailyReports.js/dailyHourly.js now
+// also use (see lib/campaignIdentity.js's header). Duplicated import
+// here rather than re-exported from those files, per this file's own
+// "zero coupling to earlier phases" convention stated below.
+import { buildCampaignIdentityResolver, buildSingleCampaignResolver } from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
@@ -33,10 +39,12 @@ const router = express.Router();
 // hour row may not line up perfectly — same caveat that already applies
 // to every other page in this app.
 //
-// Campaign-level scoping matches by NAME (normalizeCampaignName), the
-// same established matching rule as everywhere else. Ad-set/Ad-level
-// scoping matches by the adsetId/adId Shiprocket already stores per
-// order — an ID match, consistent with adSetExplorer.js/adExplorer.js.
+// Campaign-level scoping resolves via the shared current + auto-
+// historical + manual mapping chain (Campaign History Phase — see
+// lib/campaignIdentity.js's header), the same established matching rule
+// as everywhere else. Ad-set/Ad-level scoping matches by the
+// adsetId/adId Shiprocket already stores per order — an ID match,
+// consistent with adSetExplorer.js/adExplorer.js.
 // ─────────────────────────────────────────────────────────────
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -147,23 +155,31 @@ async function fetchHourlyVideoViews({ objectId, accountIds, accessToken, date }
   return byHour;
 }
 
-async function getKnownCampaignNames(accountIds, accessToken) {
-  const names = new Set();
+// Campaign History Phase — replaces the old normalized-name Set with
+// the shared current + auto-historical + manual mapping resolver (see
+// lib/campaignIdentity.js's header), built from the same live-campaigns
+// fetch this function already did, plus every campaign this app has
+// ever tracked for these accounts (via MetaEntityState, folded in
+// automatically by buildCampaignIdentityResolver).
+async function getAccountCampaignResolver(tokenId, accountIds, accessToken) {
+  const liveCampaigns = [];
   for (const accountId of accountIds || []) {
     try {
-      const raw = await fetchAllPages(`${GRAPH_BASE}/${actIdOf(accountId)}/campaigns?fields=name&limit=200&access_token=${accessToken}`);
-      raw.forEach((c) => names.add(normalizeCampaignName(c.name)));
+      const raw = await fetchAllPages(`${GRAPH_BASE}/${actIdOf(accountId)}/campaigns?fields=id,name&limit=200&access_token=${accessToken}`);
+      raw.forEach((c) => {
+        if (c?.id) liveCampaigns.push({ campaignId: c.id, campaignName: c.name, accountId });
+      });
     } catch (err) {
       console.log(`Hourly known-campaign fetch failed for ${accountId}: ${err.message}`);
     }
   }
-  return names;
+  return buildCampaignIdentityResolver({ tokenId, accountIds, liveCampaigns });
 }
 
 // Resolves the scope (campaign name for campaign-level filtering, the
 // Meta object id to request hourly insights for) from whichever of
 // campaignId/adsetId/adId was passed — narrowest wins.
-async function resolveScope({ accessToken, accountIds, campaignId, adsetId, adId }) {
+async function resolveScope({ tokenId, accessToken, accountIds, campaignId, adsetId, adId }) {
   if (adId) return { level: "ad", objectId: adId, orderFilter: (o) => String(o.adId || "") === String(adId) };
   if (adsetId) return { level: "adset", objectId: adsetId, orderFilter: (o) => String(o.adsetId || "") === String(adsetId) };
   if (campaignId) {
@@ -174,12 +190,16 @@ async function resolveScope({ accessToken, accountIds, campaignId, adsetId, adId
     } catch (err) {
       console.log(`Hourly campaign name lookup failed for ${campaignId}: ${err.message}`);
     }
-    const normalized = normalizeCampaignName(campaignName);
+    // Campaign History Phase — resolved via the shared current + auto-
+    // historical + manual mapping chain (see lib/campaignIdentity.js's
+    // header), scoped to just this one campaign, so a renamed
+    // campaign's pre-rename orders still show in its own hourly view.
+    const singleResolver = await buildSingleCampaignResolver({ tokenId, campaignId, currentName: campaignName || "" });
     return {
       level: "campaign",
       objectId: campaignId,
       campaignName,
-      orderFilter: (o) => normalized && normalizeCampaignName(o.campaignName) === normalized,
+      orderFilter: (o) => !!singleResolver.resolve(o).campaignId,
     };
   }
   return { level: "account", objectId: null, orderFilter: null };
@@ -205,7 +225,7 @@ router.get("/:tokenId", async (req, res) => {
     const cached = hourlyCache.get(cacheKey);
     if (cached) return res.json({ ...cached, cached: true });
 
-    const scope = await resolveScope({ accessToken: token.accessToken, accountIds, campaignId, adsetId, adId });
+    const scope = await resolveScope({ tokenId, accessToken: token.accessToken, accountIds, campaignId, adsetId, adId });
     const { available: metaHourlyAvailable, byHour, error: metaError } = await fetchHourlySpend({
       objectId: scope.objectId,
       accountIds,
@@ -224,9 +244,9 @@ router.get("/:tokenId", async (req, res) => {
       .select("orderId orderCreatedAt campaignName adsetId adId totalAmountPayable paymentType raw")
       .lean();
 
-    let knownNames = null;
+    let accountResolver = null;
     if (scope.level === "account") {
-      knownNames = await getKnownCampaignNames(accountIds, token.accessToken);
+      accountResolver = await getAccountCampaignResolver(tokenId, accountIds, token.accessToken);
     }
 
     const scopedOrders = scope.orderFilter ? dayOrders.filter(scope.orderFilter) : dayOrders;
@@ -239,8 +259,8 @@ router.get("/:tokenId", async (req, res) => {
       const ordersInHour = scopedOrders.filter((o) => istHourOf(o.orderCreatedAt) === h);
       let matchedOrders = ordersInHour.length;
       let unmatchedOrders = 0;
-      if (scope.level === "account" && knownNames) {
-        matchedOrders = ordersInHour.filter((o) => knownNames.has(normalizeCampaignName(o.campaignName))).length;
+      if (scope.level === "account" && accountResolver) {
+        matchedOrders = ordersInHour.filter((o) => !!accountResolver.resolve(o).campaignId).length;
         unmatchedOrders = ordersInHour.length - matchedOrders;
       }
 
@@ -308,6 +328,7 @@ router.get("/:tokenId", async (req, res) => {
 // ── GET /:tokenId/orders — drill down into one specific hour ───────
 router.get("/:tokenId/orders", async (req, res) => {
   try {
+    const { tokenId } = req.params;
     const { date, hour, campaignId, adsetId, adId, paymentType } = req.query;
     if (!date || hour === undefined) {
       return res.status(400).json({ success: false, message: "date and hour are required" });
@@ -320,13 +341,14 @@ router.get("/:tokenId/orders", async (req, res) => {
     if (adId) scoped = scoped.filter((o) => String(o.adId || "") === String(adId));
     else if (adsetId) scoped = scoped.filter((o) => String(o.adsetId || "") === String(adsetId));
     else if (campaignId) {
-      // Campaign-only scoping needs the campaign's name to name-match —
-      // the caller (frontend) already has it from the hourly summary
-      // response, so accept it directly here to avoid a second Graph
-      // API round trip just to re-derive what's already known.
+      // Campaign History Phase — resolved via the shared current + auto-
+      // historical + manual mapping chain (see lib/campaignIdentity.js's
+      // header), scoped to just this one campaign — the caller (frontend)
+      // already has campaignName from the hourly summary response, so
+      // accept it directly here to avoid a second Graph API round trip.
       const campaignName = req.query.campaignName;
-      const normalized = normalizeCampaignName(campaignName);
-      scoped = normalized ? scoped.filter((o) => normalizeCampaignName(o.campaignName) === normalized) : scoped;
+      const singleResolver = await buildSingleCampaignResolver({ tokenId, campaignId, currentName: campaignName || "" });
+      scoped = scoped.filter((o) => !!singleResolver.resolve(o).campaignId);
     }
     if (paymentType) scoped = scoped.filter((o) => o.paymentType === paymentType);
 

@@ -25,7 +25,12 @@ const shiprocketOrderSchema = new mongoose.Schema(
 
     // ── Ad attribution (from cart_data.custom_attributes) ──
     campaignId: { type: String, trim: true, default: "", index: true },
-    campaignName: { type: String, trim: true, default: "" }, // utm_campaign
+    // Campaign History Phase — indexed (previously unindexed despite
+    // being the field every campaign-matching call site filters on).
+    // Additive index only: no data/document change, no change to how
+    // this field is populated (see services/shiprocketService.js, still
+    // untouched) or read anywhere that already reads it.
+    campaignName: { type: String, trim: true, default: "", index: true }, // utm_campaign
     utmCreative: { type: String, trim: true, default: "" },
     adsetId: { type: String, trim: true, default: "", index: true },
     adsetName: { type: String, trim: true, default: "" },

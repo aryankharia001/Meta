@@ -61,18 +61,29 @@ export function activityTypeFor(prevBucket, newBucket) {
   return null;
 }
 
-const ACTIVITY_LABELS = {
-  created: "Campaign Created",
-  activated: "Campaign Activated",
-  paused: "Campaign Paused",
-  resumed: "Campaign Resumed",
-  closed: "Campaign Closed",
-  reactivated: "Campaign Reactivated",
-  tracking_started: "Activity Tracking Started",
-};
+// Phase 44 — entityType-aware label noun. Defaulting entityType to
+// "campaign" keeps every pre-Phase-44 call site (which never passes
+// entityType) byte-for-byte identical to the original ACTIVITY_LABELS
+// map this replaced; only a caller that explicitly passes "adset"/"ad"
+// (new in this phase, for Ad Set / Ad status history) gets the
+// different noun.
+const ENTITY_NOUN = { campaign: "Campaign", adset: "Ad Set", ad: "Ad" };
 
-export function activityLabel(activityType) {
-  return ACTIVITY_LABELS[activityType] || "Status Changed";
+function activityLabelsFor(entityType) {
+  const noun = ENTITY_NOUN[entityType] || "Campaign";
+  return {
+    created: `${noun} Created`,
+    activated: `${noun} Activated`,
+    paused: `${noun} Paused`,
+    resumed: `${noun} Resumed`,
+    closed: `${noun} Closed`,
+    reactivated: `${noun} Reactivated`,
+    tracking_started: "Activity Tracking Started",
+  };
+}
+
+export function activityLabel(activityType, entityType = "campaign") {
+  return activityLabelsFor(entityType)[activityType] || "Status Changed";
 }
 
 // ── Baseline seeding (first time an entity is ever observed) ───────
@@ -88,16 +99,17 @@ export function activityLabel(activityType) {
 // rather than active or inactive.
 const TRACKING_GAP_MS = 24 * 60 * 60 * 1000;
 
-export async function seedStatusHistoryBaseline({ tokenId, accountId, entityId, entityName, effectiveStatus, createdTime }) {
+export async function seedStatusHistoryBaseline({ tokenId, accountId, entityType = "campaign", entityId, entityName, effectiveStatus, createdTime }) {
   const now = new Date();
   const bucket = statusBucket(effectiveStatus);
   const createdAt = createdTime ? new Date(createdTime) : null;
   const realCreatedRecent = createdAt && !isNaN(createdAt.getTime()) && now - createdAt.getTime() <= TRACKING_GAP_MS;
+  const noun = ENTITY_NOUN[entityType] || "Campaign";
 
   const base = {
     tokenId,
     accountId,
-    entityType: "campaign",
+    entityType,
     entityId,
     entityName: entityName || "",
     previousStatus: null,
@@ -112,7 +124,7 @@ export async function seedStatusHistoryBaseline({ tokenId, accountId, entityId, 
       ...base,
       activityType: "created",
       changedAt: createdAt,
-      message: `Campaign "${entityName || entityId}" created`,
+      message: `${noun} "${entityName || entityId}" created`,
     });
   }
 
@@ -120,7 +132,7 @@ export async function seedStatusHistoryBaseline({ tokenId, accountId, entityId, 
     ...base,
     activityType: "tracking_started",
     changedAt: now,
-    message: `Activity tracking started for campaign "${entityName || entityId}" (observed status: ${effectiveStatus || "unknown"})`,
+    message: `Activity tracking started for ${noun.toLowerCase()} "${entityName || entityId}" (observed status: ${effectiveStatus || "unknown"})`,
   });
 }
 
@@ -133,7 +145,7 @@ export async function seedStatusHistoryBaseline({ tokenId, accountId, entityId, 
 // first. entityType is accepted for symmetry with MetaEntityState's own
 // schema, but the CampaignStatusHistory baseline row is only ever
 // written for entityType "campaign" — Phase 39 is campaign-only.
-export async function ensureBaseline({ tokenId, accountId, entityType = "campaign", entityId, entityName, status, effectiveStatus, createdTime }) {
+export async function ensureBaseline({ tokenId, accountId, entityType = "campaign", entityId, entityName, status, effectiveStatus, createdTime, campaignId = "", adsetId = "" }) {
   if (!tokenId || !entityId) return;
   const existing = await MetaEntityState.findOne({ tokenId, entityType, entityId }).select("_id").lean();
   if (existing) return;
@@ -147,6 +159,11 @@ export async function ensureBaseline({ tokenId, accountId, entityType = "campaig
       name: entityName || "",
       status: status || null,
       effectiveStatus: effectiveStatus || null,
+      // Phase 44 — additive linkage (blank/no-op for entityType
+      // "campaign", which has no parent) — see MetaEntityState.js's
+      // own header for why these exist.
+      campaignId: campaignId || "",
+      adsetId: adsetId || "",
       lastSyncedAt: new Date(),
     });
   } catch (err) {
@@ -157,10 +174,17 @@ export async function ensureBaseline({ tokenId, accountId, entityType = "campaig
     throw err;
   }
 
-  if (entityType !== "campaign") return;
-
-  await seedStatusHistoryBaseline({ tokenId, accountId, entityId, entityName, effectiveStatus, createdTime }).catch((err) => {
-    console.error(`Campaign status history baseline failed for ${entityId}: ${err.message}`);
+  // Phase 39 seeded this baseline row only for entityType "campaign".
+  // Phase 44 §1 extends the exact same honest baseline event to Ad
+  // Sets and Ads (Active/Paused/Closed status only — there's no
+  // budget/bid-cap concept at the Ad level) — seedStatusHistoryBaseline()
+  // is itself entityType-aware now (see its own header above), so this
+  // call is safe for whichever entityType ensureBaseline was invoked
+  // with; it never ran for anything but "campaign" before this phase
+  // added new "adset"/"ad" call sites (adSetExplorer.js/adExplorer.js),
+  // so existing campaign behavior is unchanged.
+  await seedStatusHistoryBaseline({ tokenId, accountId, entityType, entityId, entityName, effectiveStatus, createdTime }).catch((err) => {
+    console.error(`Status history baseline failed for ${entityType} ${entityId}: ${err.message}`);
   });
 }
 
@@ -195,8 +219,46 @@ export async function ensureBaselinesBulk({ tokenId, accountId, campaigns }) {
   }
 }
 
+// Phase 44 — generic bulk baseline seeder for Ad Sets/Ads (entityType
+// "adset"/"ad"), used by adSetExplorer.js's/adExplorer.js's list
+// endpoints. A NEW function rather than a modification of
+// ensureBaselinesBulk() above (which stays exactly as Phase 39 left it,
+// still only ever called with entityType "campaign" by campaigns.js/
+// campaignExplorer.js) — same "zero coupling between phases" convention
+// this file's own header documents. One existence-check query per call,
+// same "bulk, not per-item" principle as ensureBaselinesBulk() above.
+// Each entity may carry its own accountId (ad sets/ads a list endpoint
+// fetched can span multiple accounts) plus optional campaignId/adsetId
+// linkage (an ad set's parent campaign id; an ad's parent ad set id).
+export async function ensureEntityBaselinesBulk({ tokenId, entityType, entities }) {
+  const list = (entities || []).filter((e) => e && e.entityId);
+  if (!tokenId || !entityType || !list.length) return;
+
+  const ids = [...new Set(list.map((e) => String(e.entityId)))];
+  const existingRows = await MetaEntityState.find({ tokenId, entityType, entityId: { $in: ids } })
+    .select("entityId")
+    .lean();
+  const existingSet = new Set(existingRows.map((r) => String(r.entityId)));
+  const missing = list.filter((e) => !existingSet.has(String(e.entityId)));
+
+  for (const e of missing) {
+    await ensureBaseline({
+      tokenId,
+      accountId: e.accountId || "",
+      entityType,
+      entityId: e.entityId,
+      entityName: e.entityName,
+      status: e.status,
+      effectiveStatus: e.effectiveStatus,
+      createdTime: e.createdTime,
+      campaignId: e.campaignId || "",
+      adsetId: e.adsetId || "",
+    }).catch((err) => console.error(`ensureEntityBaselinesBulk failed for ${entityType} ${e.entityId}: ${err.message}`));
+  }
+}
+
 // ── Recording a genuine status transition (called from reconcileEntity) ─
-export async function recordStatusChange({ tokenId, accountId, entityId, entityName, previousStatus, newStatus, source, changedBy }) {
+export async function recordStatusChange({ tokenId, accountId, entityType = "campaign", entityId, entityName, previousStatus, newStatus, source, changedBy }) {
   const previousBucket = statusBucket(previousStatus);
   const newBucket = statusBucket(newStatus);
   const activityType = activityTypeFor(previousBucket, newBucket);
@@ -209,7 +271,7 @@ export async function recordStatusChange({ tokenId, accountId, entityId, entityN
   return CampaignStatusHistory.create({
     tokenId,
     accountId,
-    entityType: "campaign",
+    entityType,
     entityId,
     entityName: entityName || "",
     previousStatus: previousStatus || null,
@@ -220,7 +282,7 @@ export async function recordStatusChange({ tokenId, accountId, entityId, entityN
     source,
     changedBy: changedBy || "",
     changedAt: new Date(),
-    message: `${activityLabel(activityType)}${entityName ? ` — "${entityName}"` : ""} (${previousStatus || "?"} → ${newStatus || "?"})`,
+    message: `${activityLabel(activityType, entityType)}${entityName ? ` — "${entityName}"` : ""} (${previousStatus || "?"} → ${newStatus || "?"})`,
   });
 }
 
@@ -321,12 +383,12 @@ export function summarizeDurations(periods, now = new Date()) {
 
 // Single-entity snapshot (Campaign Drawer / the new /campaign-activity
 // route) — one query, no Meta calls.
-export async function getActivitySnapshot({ tokenId, entityId }) {
+export async function getActivitySnapshot({ tokenId, entityId, entityType = "campaign" }) {
   const now = new Date();
   if (!tokenId || !entityId) {
     return { available: false, periods: [], historicalDataAvailableFrom: null, campaignStart: null, campaignEnd: null, currentBucket: null, ...summarizeDurations([], now) };
   }
-  const events = await CampaignStatusHistory.find({ tokenId, entityType: "campaign", entityId }).sort({ changedAt: 1 }).lean();
+  const events = await CampaignStatusHistory.find({ tokenId, entityType, entityId }).sort({ changedAt: 1 }).lean();
   if (!events.length) {
     return { available: false, periods: [], historicalDataAvailableFrom: null, campaignStart: null, campaignEnd: null, currentBucket: null, ...summarizeDurations([], now) };
   }
@@ -336,13 +398,13 @@ export async function getActivitySnapshot({ tokenId, entityId }) {
 
 // Bulk variant for list endpoints — one query for every campaign on
 // the page instead of one query per row.
-export async function getActivitySnapshotsBulk({ tokenId, entityIds }) {
+export async function getActivitySnapshotsBulk({ tokenId, entityIds, entityType = "campaign" }) {
   const map = new Map();
   const ids = [...new Set((entityIds || []).filter(Boolean).map(String))];
   if (!tokenId || !ids.length) return map;
 
   const now = new Date();
-  const events = await CampaignStatusHistory.find({ tokenId, entityType: "campaign", entityId: { $in: ids } })
+  const events = await CampaignStatusHistory.find({ tokenId, entityType, entityId: { $in: ids } })
     .sort({ changedAt: 1 })
     .lean();
 

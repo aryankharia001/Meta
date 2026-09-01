@@ -19,17 +19,52 @@
 export const META_API_VERSION = "v23.0";
 export const GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
 
+// Meta's documented "you are being throttled, wait and retry" signals —
+// distinct from a genuine request error (bad params, missing object,
+// expired token). code 4 = app-level throttling, 17 = user-level ("too
+// many calls"), 32 = page-level, 80004 = ad-account level (this is the
+// one whose message literally reads "There have been too many calls to
+// this ad-account. Wait a bit and try again."), 613 = custom/marketing
+// API rate limit. Deliberately narrow, same convention as
+// campaignIdentity.js's isMetaObjectMissingError() — every other error
+// code (100/33 "does not exist", 190 auth, validation errors, etc.) is
+// NOT retried and throws immediately, exactly as before this existed.
+export function isMetaRateLimitError(errData) {
+  const code = errData?.code;
+  return code === 4 || code === 17 || code === 32 || code === 80004 || code === 613;
+}
+
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
+// 4s, 8s, 16s + up to 1s jitter. Jitter keeps several concurrently-
+// throttled calls from all waking up at the same instant and
+// re-triggering the same limit together.
+function rateLimitDelayMs(attempt) {
+  return Math.round(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt + Math.random() * 1000);
+}
+
 export async function fbGet(urlStr) {
-  const res = await fetch(urlStr);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    const msg = data.error?.message || `FB API error (${res.status})`;
-    const err = new Error(msg);
-    err.fbErrorCode = data.error?.code;
-    err.fbErrorSubcode = data.error?.error_subcode;
-    throw err;
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetch(urlStr);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      if (isMetaRateLimitError(data.error) && attempt < RATE_LIMIT_RETRIES) {
+        const delayMs = rateLimitDelayMs(attempt);
+        console.warn(
+          `Meta API rate limit (code ${data.error.code}) — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      const msg = data.error?.message || `FB API error (${res.status})`;
+      const err = new Error(msg);
+      err.fbErrorCode = data.error?.code;
+      err.fbErrorSubcode = data.error?.error_subcode;
+      throw err;
+    }
+    return data;
   }
-  return data;
 }
 
 export async function fetchAllPages(url, { maxPages = 20 } = {}) {

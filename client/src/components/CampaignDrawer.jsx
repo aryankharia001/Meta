@@ -36,6 +36,8 @@ import {
   // Phase 39 — Campaign Activity History / Active Performance section icons.
   Activity,
   TrendingUp,
+  // Campaign History Phase — Campaign Identity section icon.
+  Fingerprint,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { fetchCampaignDetails, logActivity, fetchProfitCampaigns, fetchCampaignActivityTimeline } from "../lib/api";
@@ -66,6 +68,11 @@ import CampaignActivitySummaryCard from "./campaignActivity/CampaignActivitySumm
 import CampaignActivityHistoryList from "./campaignActivity/CampaignActivityHistoryList";
 import ActivePeriodsBar from "./campaignActivity/ActivePeriodsBar";
 import ActivePerformanceSection from "./campaignActivity/ActivePerformanceSection";
+// Campaign History Phase — Campaign Identity / Historical Names
+// section. New, additive import; nothing above/below this line is
+// touched. Own independent fetch (see CampaignIdentitySection.jsx's
+// own header), same isolation as the Phase 39 imports just above.
+import CampaignIdentitySection from "./campaignIdentity/CampaignIdentitySection";
 import { recordRecentlyViewed } from "../lib/recentlyViewed";
 import { useColumnPrefs } from "../lib/useColumnPrefs";
 import ColumnSettingsMenu from "./ColumnSettingsMenu";
@@ -411,8 +418,23 @@ export default function CampaignDrawer() {
   // null. Drives the OrdersListPopup drill-down below.
   const [statPopup, setStatPopup] = useState(null);
 
+  // Campaign History Phase §29 — the missing half of "show cached data
+  // immediately, refresh in background" (loadDetails previously only
+  // ever did cache-OR-fetch, never both). Tracks which request is the
+  // most recent one loadDetails was asked for, so a background refetch
+  // that resolves after the user has since moved on (a different
+  // campaign, a different date range, or an explicit force-refresh)
+  // can detect it's stale and discard itself — same guard purpose the
+  // activityTimeline effect above serves with its own `cancelled` flag,
+  // just expressed as a ref since loadDetails isn't scoped to a single
+  // effect's lifecycle (it's also called directly by the header's
+  // refresh button and the error screen's retry button).
+  const latestRequestKeyRef = useRef(null);
+
   const loadDetails = (meta, { force = false, isNewCampaign = false } = {}) => {
     const { tokenId, campaignId, campaignName, accountId, since, until } = meta;
+    const requestKey = `${tokenId}:${campaignId}:${accountId}:${since}:${until}`;
+    latestRequestKeyRef.current = requestKey;
 
     if (!force) {
       const cached = getCachedCampaignDetails(tokenId, campaignId, accountId, since, until);
@@ -420,6 +442,19 @@ export default function CampaignDrawer() {
         setDetails(cached);
         setError("");
         setLoading(false);
+        // Silent background refresh: re-fetch the same campaign/range
+        // and, if this is still the most recently requested one when it
+        // resolves, quietly replace `details`/the cache with the fresh
+        // copy. Never shows a loading state and never surfaces its own
+        // errors — the cached data already satisfied this view, so a
+        // background refresh failing shouldn't interrupt it.
+        fetchCampaignDetails(tokenId, campaignId, { campaignName, accountId, since, until })
+          .then((res) => {
+            if (latestRequestKeyRef.current !== requestKey) return; // superseded by a newer request
+            setDetails(res);
+            setCachedCampaignDetails(tokenId, campaignId, accountId, since, until, res);
+          })
+          .catch(() => {});
         return;
       }
     }
@@ -948,6 +983,17 @@ export default function CampaignDrawer() {
 
             {/* ── Scrollable body ─────────────────────────────── */}
             <div className={`flex-1 overflow-y-auto px-6 py-6 space-y-8 transition-opacity ${loading ? "opacity-60 pointer-events-none" : ""}`}>
+              {/* Campaign History Phase — Campaign Identity / Historical
+                  Names. Purely additive section, its own independent
+                  fetch (see CampaignIdentitySection.jsx's own header) —
+                  never touches `details`/loadDetails or any section
+                  below. Placed first so the campaign's permanent
+                  identity is the first thing shown in the drawer body. */}
+              <section>
+                <SectionTitle icon={Fingerprint}>Campaign Identity</SectionTitle>
+                <CampaignIdentitySection tokenId={activeCampaign.tokenId} campaignId={details.campaign.id} />
+              </section>
+
               {/* Phase 27 — Budget & Bid Cap Control, History, Sync,
                   Hourly Activity. Purely additive section — reads/writes
                   only the new Phase 27 /campaign-control endpoints,

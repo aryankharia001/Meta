@@ -14,6 +14,9 @@ import {
   GRAPH_BASE,
 } from "../lib/metaGraph.js";
 import { getStoredShiprocketOrders, summarizeStoredOrders } from "../services/shiprocketService.js";
+// Phase 44 — Campaign Activity History, extended to Ads. Additive
+// import only; nothing above is touched.
+import { ensureEntityBaselinesBulk } from "../lib/campaignActivity.js";
 
 const router = express.Router();
 
@@ -219,6 +222,28 @@ router.get("/:tokenId", async (req, res) => {
     let ads = [...byAdId.values()];
     if (campaignId) ads = ads.filter((a) => String(a.meta.campaign_id || "") === String(campaignId));
     if (adsetId) ads = ads.filter((a) => String(a.meta.adset_id || "") === String(adsetId));
+
+    // Phase 44 §1/§4/§19 — Campaign Activity History, extended to Ads:
+    // seed a MetaEntityState + Ad status-history baseline for any ad in
+    // this list not tracked yet. DB-only (reuses `ads`, already fetched
+    // above), a no-op once tracked, never blocks/fails this response if
+    // it errors. Once seeded, metaEntitySyncCron.js's periodic poll
+    // takes over detecting further status changes for it (Ads have no
+    // budget/bid-cap of their own to poll).
+    await ensureEntityBaselinesBulk({
+      tokenId,
+      entityType: "ad",
+      entities: ads.map(({ meta, accountId }) => ({
+        entityId: String(meta.id || ""),
+        entityName: meta.name || "",
+        status: meta.status || null,
+        effectiveStatus: meta.effective_status || null,
+        createdTime: meta.created_time || null,
+        campaignId: String(meta.campaign_id || ""),
+        adsetId: String(meta.adset_id || ""),
+        accountId,
+      })),
+    }).catch((err) => console.log(`Ad activity baseline seeding failed: ${err.message}`));
 
     const rawOrders = await ShiprocketOrder.find({ orderDate: { $gte: since, $lte: until } })
       .select("orderId adId totalAmountPayable paymentType raw")

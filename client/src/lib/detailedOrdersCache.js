@@ -17,3 +17,14 @@ export function getCachedDetailedOrders(tokenId, accountsKey, since, until) {
 export function setCachedDetailedOrders(tokenId, accountsKey, since, until, data) {
   cache.set(keyFor(tokenId, accountsKey, since, until), data);
 }
+
+
+// Campaign History Phase — exported so invalidateOrderMatchingCaches.js (called after a manual historical
+// name mapping is added/edited/deleted) can force this session-
+// lifetime cache to refetch instead of continuing to serve an
+// order-matching result computed before the mapping existed. Every
+// existing getter/setter above is untouched — this only ever clears,
+// never reads or writes a value.
+export function clearDetailedOrdersCache() {
+  cache.clear();
+}

@@ -9,6 +9,15 @@ import { recordActivity } from "../lib/activityLog.js";
 import { fbGet, actIdOf, extractDeliveryStatus, deliveryBucket6, createTtlCache, GRAPH_BASE } from "../lib/metaGraph.js";
 import { operatingExpenseForDay, operatingExpenseForRange, operatingExpenseForHour } from "../lib/expenseAllocation.js";
 import { requireAdmin } from "../middleware/auth.js";
+// Campaign History Phase — additive import only, same shared resolver
+// campaigns.js/campaignExplorer.js/dailyReports.js/dailyHourly.js/
+// hourly.js now also use (see lib/campaignIdentity.js's header).
+// Duplicated import here rather than re-exported from those files, per
+// this file's own "zero coupling to earlier phases" convention stated
+// below. Only the CAMPAIGN matching path (buildRangeContext) uses this
+// — the separate product-cost name matching a little further below is
+// untouched, different data entirely.
+import { buildCampaignIdentityResolver } from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
@@ -30,13 +39,15 @@ const router = express.Router();
 // for audit logging, same as every other phase's mutating routes.
 //
 // Campaign matching follows the exact same rule dailyReports.js/
-// dailyHourly.js already established: match by NAME
-// (normalizeCampaignName) against the real campaigns Meta returns for
-// the selected ad accounts — never by the raw campaignId Shiprocket
-// stores per order (unreliable UTM-sourced field). An order whose name
-// doesn't match any real campaign is surfaced as "Unmatched Orders",
-// never guessed (§14 of Phase 15, carried forward here as the same "no
-// fake data" principle Phase 16 §4/§14 also demands).
+// dailyHourly.js/hourly.js already established (Campaign History
+// Phase): the order's campaign_name is resolved through the shared
+// current + auto-historical + manual mapping chain
+// (lib/campaignIdentity.js) to a Campaign ID — never by the raw
+// campaignId Shiprocket stores per order (unreliable UTM-sourced
+// field). An order that resolves to no campaign at all is surfaced as
+// "Unmatched Orders", never guessed (§14 of Phase 15, carried forward
+// here as the same "no fake data" principle Phase 16 §4/§14 also
+// demands).
 //
 // Product cost matching (Phase 18 §1 rewrite) tries, per line item, in
 // priority order: Variant ID -> SKU -> Product ID -> normalized product
@@ -404,10 +415,20 @@ async function buildRangeContext(tokenId, { since, until, adAccountIdParam }) {
     });
   }
 
-  const byNormName = new Map(); // normalized name -> {campaignId, campaignName}
-  campaignMeta.forEach((v, id) => {
-    const n = normalizeCampaignName(v.name);
-    if (n && !byNormName.has(n)) byNormName.set(n, { campaignId: id, campaignName: v.name });
+  // Campaign History Phase — spec §21's required direction: order's
+  // campaign_name -> current + auto-historical + manual mapping chain ->
+  // Campaign ID, not the old "known campaign name -> orders" direction
+  // this file used to use (see lib/campaignIdentity.js's header). Also
+  // resolves a renamed campaign's pre-rename orders correctly, which
+  // the old exact-current-name match could not do.
+  const campaignIdentityResolver = await buildCampaignIdentityResolver({
+    tokenId,
+    accountIds,
+    liveCampaigns: [...campaignMeta.entries()].map(([id, v]) => ({
+      campaignId: id,
+      campaignName: v.name,
+      accountId: v.accountId,
+    })),
   });
 
   const spendByDayCampaign = new Map(); // `${day}|${campaignId}` -> spend
@@ -430,19 +451,22 @@ async function buildRangeContext(tokenId, { since, until, adAccountIdParam }) {
   const productCostMap = await buildProductCostMap();
 
   const orders = rawOrders.map((o) => {
-    const norm = normalizeCampaignName(o.campaignName);
-    const match = norm ? byNormName.get(norm) : null;
+    const match = campaignIdentityResolver.resolve(o);
     const costs = computeOrderCosts(o, productCostMap);
     const amount = Number(o.totalAmountPayable || 0);
     return {
       orderId: o.orderId,
       date: o.orderDate,
       hour: istHourOf(o.orderCreatedAt),
-      matchedCampaignId: match ? match.campaignId : null,
-      matchedCampaignName: match ? match.campaignName : o.campaignName || "Unmatched Orders",
-      isUnmatched: !match,
-      accountId: match ? campaignMeta.get(match.campaignId)?.accountId || null : null,
-      accountName: match ? campaignMeta.get(match.campaignId)?.accountName || null : null,
+      matchedCampaignId: match.campaignId,
+      matchedCampaignName: match.campaignId ? (match.currentName || o.campaignName || "Unmatched Orders") : (o.campaignName || "Unmatched Orders"),
+      isUnmatched: !match.campaignId,
+      // Campaign History Phase §22 — per-order matching debug info,
+      // additive alongside the existing matchedCampaignId/
+      // matchedCampaignName/isUnmatched fields.
+      matchType: match.matchType,
+      accountId: match.campaignId ? campaignMeta.get(match.campaignId)?.accountId || null : null,
+      accountName: match.campaignId ? campaignMeta.get(match.campaignId)?.accountName || null : null,
       paymentType: o.paymentType || null,
       amount,
       deliveryStatus: extractDeliveryStatus(o.raw),

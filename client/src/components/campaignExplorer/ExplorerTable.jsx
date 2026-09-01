@@ -332,6 +332,15 @@ export default function ExplorerTable({ campaigns, tokenId, since, until, onOpen
                               <div className="flex items-center gap-2 min-w-0">
                                 <LiveIndicator campaign={c} />
                                 <span className="campaign-name truncate max-w-[190px]">{c.campaignName}</span>
+                                {/* Campaign History Phase §9/§10 — only ever
+                                    present when the page fetched with
+                                    includeNoLongerReturned=true; never
+                                    deleted, just flagged. */}
+                                {c.isDeleted && (
+                                  <span className="badge badge-amber shrink-0" title="Meta no longer returns this campaign — its history, orders, and identity are preserved permanently">
+                                    No Longer Returned
+                                  </span>
+                                )}
                               </div>
                             </td>
                           );

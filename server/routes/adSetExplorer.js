@@ -14,6 +14,11 @@ import {
   GRAPH_BASE,
 } from "../lib/metaGraph.js";
 import { getStoredShiprocketOrders, summarizeStoredOrders } from "../services/shiprocketService.js";
+// Phase 44 — Campaign Activity History, extended to Ad Sets. Additive
+// import only; nothing above is touched. See campaignActivity.js's own
+// header for ensureEntityBaselinesBulk()'s contract (a generic sibling
+// of Phase 39's campaign-only ensureBaselinesBulk()).
+import { ensureEntityBaselinesBulk } from "../lib/campaignActivity.js";
 
 const router = express.Router();
 
@@ -209,6 +214,29 @@ router.get("/:tokenId", async (req, res) => {
     if (campaignId) {
       adsets = adsets.filter((a) => String(a.meta.campaign_id || "") === String(campaignId));
     }
+
+    // Phase 44 §1/§4/§19 — Campaign Activity History, extended to Ad
+    // Sets: seed a MetaEntityState + Ad Set status-history baseline for
+    // any ad set in this list that isn't tracked yet. DB-only (reuses
+    // `adsets`, already fetched above — no extra Meta call), a no-op
+    // once tracked. Never blocks/fails this response if it errors —
+    // Activity History is additive, not load-bearing for this route's
+    // existing fields. Once a baseline exists, metaEntitySyncCron.js's
+    // periodic poll takes over detecting further budget/bid-cap/status
+    // changes for it, exactly like it already does for campaigns.
+    await ensureEntityBaselinesBulk({
+      tokenId,
+      entityType: "adset",
+      entities: adsets.map(({ meta, accountId }) => ({
+        entityId: String(meta.id || ""),
+        entityName: meta.name || "",
+        status: meta.status || null,
+        effectiveStatus: meta.effective_status || null,
+        createdTime: meta.created_time || null,
+        campaignId: String(meta.campaign_id || ""),
+        accountId,
+      })),
+    }).catch((err) => console.log(`Ad set activity baseline seeding failed: ${err.message}`));
 
     // Orders in range, once, then grouped by adsetId — same "fetch once,
     // group by attribution key" shape groupStoredOrdersByAttribution()

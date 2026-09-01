@@ -8,6 +8,14 @@ import AdAccount from "../models/AdAccount.js";
 // import here (not re-exported from campaigns.js) per this file's own
 // "zero coupling to earlier/sibling phases" convention stated above.
 import { ensureBaselinesBulk, getActivitySnapshotsBulk, classifyOrders, computePrimaryRoas, statusBucket } from "../lib/campaignActivity.js";
+// Campaign History Phase — additive import only, same shared resolver
+// routes/campaigns.js's /compare now also uses (see
+// lib/campaignIdentity.js's header). Duplicated import here rather than
+// re-exported from campaigns.js, per this file's own "zero coupling to
+// earlier/sibling phases" convention stated above — the resolver itself
+// is the one deliberate, documented exception to that convention.
+import MetaEntityState from "../models/MetaEntityState.js";
+import { buildCampaignIdentityResolver, buildSingleCampaignResolver } from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
@@ -31,14 +39,49 @@ const router = express.Router();
 
 // ── Graph API helpers (duplicated from campaigns.js) ──────────
 
+// Meta's "you are being throttled, wait and retry" signals — code 4
+// (app-level), 17 (user-level, "too many calls"), 32 (page-level),
+// 80004 (ad-account level — "There have been too many calls to this
+// ad-account. Wait a bit and try again."), 613 (custom/marketing API
+// rate limit). Deliberately narrow: every other error (missing object,
+// bad token, validation) is NOT retried and throws on the first
+// attempt, same as before. Duplicated locally rather than imported from
+// lib/metaGraph.js on purpose — this file keeps its own fbGet copy
+// exactly as the rest of its header already explains, so nothing here
+// couples to, or can be changed by, any other phase's copy.
+function isMetaRateLimitError(errData) {
+  const code = errData?.code;
+  return code === 4 || code === 17 || code === 32 || code === 80004 || code === 613;
+}
+
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
+function rateLimitDelayMs(attempt) {
+  return Math.round(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt + Math.random() * 1000);
+}
+
 async function fbGet(urlStr) {
-  const res = await fetch(urlStr);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    const msg = data.error?.message || `FB API error (${res.status})`;
-    throw new Error(msg);
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetch(urlStr);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      if (isMetaRateLimitError(data.error) && attempt < RATE_LIMIT_RETRIES) {
+        const delayMs = rateLimitDelayMs(attempt);
+        console.warn(
+          `Meta API rate limit (code ${data.error.code}) — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      const msg = data.error?.message || `FB API error (${res.status})`;
+      const err = new Error(msg);
+      err.fbErrorCode = data.error?.code;
+      err.fbErrorSubcode = data.error?.error_subcode;
+      throw err;
+    }
+    return data;
   }
-  return data;
 }
 
 async function fetchAllPages(url) {
@@ -257,7 +300,7 @@ function cacheSet(key, value) {
 }
 
 // ── Core: fetch + combine Meta + Shiprocket for a set of accounts ──
-async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since, until }) {
+async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since, until, includeNoLongerReturned = false }) {
   const insightFields = [
     "campaign_id", "campaign_name", "spend", "impressions", "reach", "clicks",
     "ctr", "cpc", "cpm", "frequency", "actions", "action_values", "purchase_roas",
@@ -386,6 +429,44 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
     });
   }
 
+  // Campaign History Phase §9/§10 — deleted / no-longer-returned
+  // campaigns, folded into metaByCampaignId (same shape live entries
+  // already use: { meta, insights, accountId, accountName }) only when
+  // explicitly requested, so every downstream step below (activity
+  // snapshots, order matching, delivery/product/city aggregation, the
+  // row-shaping return{} at the end of the .map()) handles them through
+  // the exact same code live campaigns already go through, rather than
+  // a second hand-duplicated row shape. `insights` stays undefined, so
+  // spend/impressions/clicks/etc. all naturally compute to 0 — Meta no
+  // longer reports insights for a deleted campaign id. meta.isDeleted /
+  // meta.noLongerReturnedAt are extra fields deriveBudget()/deriveBidCap()
+  // don't look at; the row-shaping code below reads them explicitly.
+  if (includeNoLongerReturned) {
+    const deletedFilter = { tokenId: String(token._id), entityType: "campaign", isDeleted: true };
+    if (accountIds && accountIds.length) deletedFilter.accountId = { $in: accountIds };
+    const deletedRows = await MetaEntityState.find(deletedFilter).lean();
+    deletedRows.forEach((state) => {
+      const id = String(state.entityId);
+      if (metaByCampaignId.has(id)) return; // already live this tick — not actually deleted
+      metaByCampaignId.set(id, {
+        meta: {
+          id,
+          name: state.name || id,
+          status: state.status || null,
+          effective_status: state.effectiveStatus || null,
+          daily_budget: state.budgetType === "daily" && state.budget !== null && state.budget !== undefined ? Math.round(state.budget * 100) : undefined,
+          lifetime_budget: state.budgetType === "lifetime" && state.budget !== null && state.budget !== undefined ? Math.round(state.budget * 100) : undefined,
+          bid_amount: state.bidAmount !== null && state.bidAmount !== undefined ? Math.round(state.bidAmount * 100) : undefined,
+          isDeleted: true,
+          noLongerReturnedAt: state.noLongerReturnedAt || null,
+        },
+        insights: undefined,
+        accountId: state.accountId,
+        accountName: accountNameMap.get(state.accountId) || state.accountId,
+      });
+    });
+  }
+
   // Phase 39 — Campaign Activity snapshots for every campaign about to
   // be returned. ONE bulk query for the whole page, same "bulk, not
   // per-item" principle the Ad Set budget/bid-cap fallback above
@@ -401,21 +482,37 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
     .select("orderId orderDate campaignId campaignName totalAmountPayable paymentType paymentStatus orderCreatedAt phone address raw")
     .lean();
 
-  const ordersByCampaignName = new Map();
-  rawOrders.forEach((o) => {
-    const key = normalizeCampaignName(o.campaignName);
-    if (!key) return;
-    if (!ordersByCampaignName.has(key)) ordersByCampaignName.set(key, []);
-    ordersByCampaignName.get(key).push(o);
+  // Campaign History Phase — spec §21's required direction: order's
+  // campaign_name -> current + auto-historical + manual mapping chain ->
+  // Campaign ID, not the old "campaign -> name-match -> orders"
+  // direction this file used to use (see lib/campaignIdentity.js's
+  // header). Also resolves a renamed campaign's pre-rename orders
+  // correctly, which the old exact-current-name match could not do.
+  const campaignIdentityResolver = await buildCampaignIdentityResolver({
+    tokenId: String(token._id),
+    accountIds,
+    liveCampaigns: [...metaByCampaignId.values()].map(({ meta, accountId }) => ({
+      campaignId: meta.id,
+      campaignName: meta.name,
+      accountId,
+    })),
   });
 
-  const knownNames = new Set([...metaByCampaignId.values()].map((v) => normalizeCampaignName(v.meta.name)));
+  const ordersByCampaignId = {};
+  const orderMatchById = new Map();
+  rawOrders.forEach((o) => {
+    const match = campaignIdentityResolver.resolve(o);
+    orderMatchById.set(o.orderId, match);
+    if (match.campaignId) {
+      if (!ordersByCampaignId[match.campaignId]) ordersByCampaignId[match.campaignId] = [];
+      ordersByCampaignId[match.campaignId].push(o);
+    }
+  });
 
   const campaigns = [...metaByCampaignId.values()].map(({ meta, insights, accountId, accountName }) => {
     const campaignId = String(meta.id || "");
     const campaignName = meta.name || insights?.campaign_name || "Untitled Campaign";
-    const normalizedName = normalizeCampaignName(campaignName);
-    const campaignOrders = ordersByCampaignName.get(normalizedName) || [];
+    const campaignOrders = ordersByCampaignId[campaignId] || [];
 
     const spend = Number(insights?.spend || 0);
     const impressions = Number(insights?.impressions || 0);
@@ -559,6 +656,11 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
       createdTime: meta.created_time || null,
       updatedTime: meta.updated_time || null,
       lastOrderAt: lastOrderAt ? lastOrderAt.toISOString() : null,
+      // Campaign History Phase §9/§10 — additive fields only. false/null
+      // for every live campaign (meta.isDeleted is only ever set on the
+      // synthetic entries injected above).
+      isDeleted: !!meta.isDeleted,
+      noLongerReturnedAt: meta.noLongerReturnedAt || null,
 
       // Phase 39 §15 — Campaign Activity column group. `roas` below
       // (spend ÷ ALL matched-order revenue in range) stays exactly as
@@ -626,7 +728,7 @@ async function fetchCombinedCampaigns({ token, accountIds, accountNameMap, since
   // Global "truly unmatched" — same classification KpiAnalyticsPopup.jsx
   // already established: an order whose campaign name doesn't match ANY
   // known campaign for these accounts, in-range or not.
-  const unmatchedOrders = rawOrders.filter((o) => !knownNames.has(normalizeCampaignName(o.campaignName)));
+  const unmatchedOrders = rawOrders.filter((o) => !orderMatchById.get(o.orderId)?.campaignId);
 
   return { campaigns, unmatchedOrdersCount: unmatchedOrders.length };
 }
@@ -639,15 +741,19 @@ router.get("/:tokenId", async (req, res) => {
     if (!since || !until) {
       return res.status(400).json({ success: false, message: "since and until are required" });
     }
+    // Campaign History Phase §9/§10 — hidden by default, revealed via
+    // this explicit opt-in flag (same convention routes/campaigns.js's
+    // /compare now uses).
+    const includeNoLongerReturned = String(req.query.includeNoLongerReturned) === "true";
 
     const { token, accountIds, accountNameMap } = await resolveTokenAndAccounts(tokenId, req.query.adAccountId);
 
-    const cacheKey = `list:${tokenId}:${[...accountIds].sort().join(",")}:${since}:${until}`;
+    const cacheKey = `list:${tokenId}:${[...accountIds].sort().join(",")}:${since}:${until}:${includeNoLongerReturned}`;
     const cached = cacheGet(cacheKey);
     if (cached) return res.json({ ...cached, cached: true });
 
     const { campaigns, unmatchedOrdersCount } = await fetchCombinedCampaigns({
-      token, accountIds, accountNameMap, since, until,
+      token, accountIds, accountNameMap, since, until, includeNoLongerReturned,
     });
 
     const totalSpend = campaigns.reduce((s, c) => s + c.spend, 0);
@@ -771,11 +877,21 @@ router.get("/:tokenId/:campaignId/breakdown", async (req, res) => {
       }
     }
 
-    const normalizedTarget = normalizeCampaignName(campaignName);
+    // Campaign History Phase — resolved via the same shared current +
+    // auto-historical + manual name chain the list route above uses
+    // (buildSingleCampaignResolver — scoped to just this one campaign,
+    // so there's no cross-campaign ambiguity), replacing the old exact-
+    // current-name-only comparison. See lib/campaignIdentity.js's
+    // header.
+    const singleResolver = await buildSingleCampaignResolver({
+      tokenId,
+      campaignId,
+      currentName: campaignName,
+    });
     const rawOrders = await ShiprocketOrder.find({ orderDate: { $gte: since, $lte: until } })
       .select("orderId orderDate campaignName totalAmountPayable paymentType orderCreatedAt phone address raw")
       .lean();
-    const orders = rawOrders.filter((o) => normalizeCampaignName(o.campaignName) === normalizedTarget);
+    const orders = rawOrders.filter((o) => singleResolver.resolve(o).campaignId);
 
     const byDay = new Map();
     const delivery = { delivered: 0, pending: 0, processing: 0, cancelled: 0, returned: 0, rto: 0 };

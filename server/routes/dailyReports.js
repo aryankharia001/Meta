@@ -2,6 +2,12 @@ import express from "express";
 import ShiprocketOrder from "../models/shiprocketorder.js";
 import Token from "../models/Token.js";
 import AdAccount from "../models/AdAccount.js";
+// Campaign History Phase — additive import only, same shared resolver
+// campaigns.js's /compare and campaignExplorer.js now also use (see
+// lib/campaignIdentity.js's header). Duplicated import here rather than
+// re-exported from those files, per this file's own "zero coupling to
+// earlier phases" convention stated below.
+import { buildCampaignIdentityResolver, buildSingleCampaignResolver } from "../lib/campaignIdentity.js";
 
 const router = express.Router();
 
@@ -29,14 +35,49 @@ const router = express.Router();
 
 // ── Graph API helpers (duplicated from campaignExplorer.js) ──────
 
+// Meta's "you are being throttled, wait and retry" signals — code 4
+// (app-level), 17 (user-level, "too many calls"), 32 (page-level),
+// 80004 (ad-account level — "There have been too many calls to this
+// ad-account. Wait a bit and try again."), 613 (custom/marketing API
+// rate limit). Deliberately narrow: every other error (missing object,
+// bad token, validation) is NOT retried and throws on the first
+// attempt, same as before. Duplicated locally rather than imported from
+// lib/metaGraph.js on purpose — this file keeps its own fbGet copy
+// exactly as the rest of its header already explains, so nothing here
+// couples to, or can be changed by, any other phase's copy.
+function isMetaRateLimitError(errData) {
+  const code = errData?.code;
+  return code === 4 || code === 17 || code === 32 || code === 80004 || code === 613;
+}
+
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
+function rateLimitDelayMs(attempt) {
+  return Math.round(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt + Math.random() * 1000);
+}
+
 async function fbGet(urlStr) {
-  const res = await fetch(urlStr);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) {
-    const msg = data.error?.message || `FB API error (${res.status})`;
-    throw new Error(msg);
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetch(urlStr);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      if (isMetaRateLimitError(data.error) && attempt < RATE_LIMIT_RETRIES) {
+        const delayMs = rateLimitDelayMs(attempt);
+        console.warn(
+          `Meta API rate limit (code ${data.error.code}) — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      const msg = data.error?.message || `FB API error (${res.status})`;
+      const err = new Error(msg);
+      err.fbErrorCode = data.error?.code;
+      err.fbErrorSubcode = data.error?.error_subcode;
+      throw err;
+    }
+    return data;
   }
-  return data;
 }
 
 async function fetchAllPages(url) {
@@ -489,17 +530,32 @@ router.get("/:tokenId", async (req, res) => {
       .select("orderId orderDate campaignId campaignName totalAmountPayable paymentType orderCreatedAt phone address raw")
       .lean();
 
-    const knownNames = new Set([...campaignMeta.values()].map((v) => normalizeCampaignName(v.name)));
+    // Campaign History Phase — spec §21's required direction: order's
+    // campaign_name -> current + auto-historical + manual mapping chain
+    // -> Campaign ID, not the old "known campaign name -> orders"
+    // direction this file used to use (see lib/campaignIdentity.js's
+    // header). Keyed by campaignId (stable across a rename) instead of
+    // normalized name, so a renamed campaign's pre-rename orders still
+    // land on the right day/campaign row below.
+    const campaignIdentityResolver = await buildCampaignIdentityResolver({
+      tokenId,
+      accountIds,
+      liveCampaigns: [...campaignMeta.entries()].map(([id, v]) => ({
+        campaignId: id,
+        campaignName: v.name,
+        accountId: v.accountId,
+      })),
+    });
 
-    const ordersByDayName = new Map(); // `${day}|${normalizedName}` -> orders[]
+    const ordersByDayCampaignId = new Map(); // `${day}|${campaignId}` -> orders[]
     const unmatchedByDay = new Map(); // day -> orders[]
     rawOrders.forEach((o) => {
       const day = o.orderDate;
-      const norm = normalizeCampaignName(o.campaignName);
-      if (norm && knownNames.has(norm)) {
-        const key = `${day}|${norm}`;
-        if (!ordersByDayName.has(key)) ordersByDayName.set(key, []);
-        ordersByDayName.get(key).push(o);
+      const match = campaignIdentityResolver.resolve(o);
+      if (match.campaignId) {
+        const key = `${day}|${match.campaignId}`;
+        if (!ordersByDayCampaignId.has(key)) ordersByDayCampaignId.set(key, []);
+        ordersByDayCampaignId.get(key).push(o);
       } else {
         if (!unmatchedByDay.has(day)) unmatchedByDay.set(day, []);
         unmatchedByDay.get(day).push(o);
@@ -522,8 +578,7 @@ router.get("/:tokenId", async (req, res) => {
         if (row.date_start === date && Number(row.spend || 0) > 0) activeCampaignIds.add(String(row.campaign_id || ""));
       });
       campaignMeta.forEach((v, id) => {
-        const n = normalizeCampaignName(v.name);
-        if (ordersByDayName.has(`${date}|${n}`)) activeCampaignIds.add(id);
+        if (ordersByDayCampaignId.has(`${date}|${id}`)) activeCampaignIds.add(id);
       });
 
       const rows = [];
@@ -531,8 +586,7 @@ router.get("/:tokenId", async (req, res) => {
         if (!campaignId) return;
         const meta = campaignMeta.get(campaignId);
         if (!meta) return;
-        const norm = normalizeCampaignName(meta.name);
-        const campaignOrders = ordersByDayName.get(`${date}|${norm}`) || [];
+        const campaignOrders = ordersByDayCampaignId.get(`${date}|${campaignId}`) || [];
         rows.push(
           buildRow({
             date,
@@ -721,25 +775,34 @@ router.get("/:tokenId/detail", async (req, res) => {
       .select("orderId orderDate campaignId campaignName totalAmountPayable paymentType paymentStatus orderCreatedAt phone address raw")
       .lean();
 
+    // Campaign History Phase — same shared current + auto-historical +
+    // manual mapping chain the list route above uses (see
+    // lib/campaignIdentity.js's header), replacing the old exact-
+    // current-name-only comparison so a renamed campaign's pre-rename
+    // orders still land in its own drill-down rather than "Unmatched".
     let matchingOrders;
     if (isUnmatched) {
-      const knownNames = new Set();
+      const liveCampaigns = [];
       for (const acc of candidateAccountIds) {
         const actId = acc.startsWith("act_") ? acc : `act_${acc}`;
         try {
           const list = await tryFetchCampaigns(actId, token.accessToken);
           list.forEach((c) => {
-            const n = normalizeCampaignName(c.name);
-            if (n) knownNames.add(n);
+            if (c?.id) liveCampaigns.push({ campaignId: c.id, campaignName: c.name, accountId: acc });
           });
         } catch (err) {
           console.log(`Daily detail known-names fetch failed for ${actId}: ${err.message}`);
         }
       }
-      matchingOrders = rawOrders.filter((o) => !knownNames.has(normalizeCampaignName(o.campaignName)));
+      const identityResolver = await buildCampaignIdentityResolver({
+        tokenId,
+        accountIds: candidateAccountIds,
+        liveCampaigns,
+      });
+      matchingOrders = rawOrders.filter((o) => !identityResolver.resolve(o).campaignId);
     } else {
-      const normalizedTarget = normalizeCampaignName(campaignName);
-      matchingOrders = rawOrders.filter((o) => normalizeCampaignName(o.campaignName) === normalizedTarget);
+      const singleResolver = await buildSingleCampaignResolver({ tokenId, campaignId, currentName: campaignName });
+      matchingOrders = rawOrders.filter((o) => singleResolver.resolve(o).campaignId);
     }
 
     const orders = matchingOrders
